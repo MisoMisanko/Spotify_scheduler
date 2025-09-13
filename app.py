@@ -23,16 +23,21 @@ REDIRECT_URI = os.environ["SPOTIPY_REDIRECT_URI"]
 st.set_page_config(page_title="Festival Personality App", page_icon="🎧", layout="centered")
 st.title("🎧 Festival Personality App")
 
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+from spotipy.oauth2 import SpotifyOAuth
+
+auth_manager = SpotifyOAuth(
     client_id=CLIENT_ID,
     client_secret=CLIENT_SECRET,
     redirect_uri=REDIRECT_URI,
     scope=SCOPES,
     cache_path=".cache",
     open_browser=False,
-    show_dialog=True    # 👈 this forces a fresh login every time
-))
+    show_dialog=True
+)
 
+sp = spotipy.Spotify(auth_manager=auth_manager)
+
+# Debug: print login URL
 st.write("Auth URL:", auth_manager.get_authorize_url())
 
 # -----------------------------
