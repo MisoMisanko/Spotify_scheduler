@@ -9,6 +9,7 @@ import streamlit as st
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
+
 from dotenv import load_dotenv
 load_dotenv()  # this reads .env automatically
 
@@ -30,17 +31,32 @@ auth_manager = SpotifyOAuth(
     client_secret=CLIENT_SECRET,
     redirect_uri=REDIRECT_URI,
     scope=SCOPES,
-    cache_path=".cache",
     open_browser=False,
     show_dialog=True
 )
 
-if not auth_manager.get_cached_token():
-    st.warning("⚠️ You are not logged in yet. Please click the login link above.")
-    st.write("Auth URL:", auth_manager.get_authorize_url())
-    st.stop()
+# --- First-time login ---
+if "token_info" not in st.session_state:
+    token_info = auth_manager.get_cached_token()
+    if not token_info:
+        st.warning("⚠️ You are not logged in yet. Please click the login link above.")
+        st.write("Auth URL:", auth_manager.get_authorize_url())
+        st.stop()
+    else:
+        st.session_state["token_info"] = token_info
 
-sp = spotipy.Spotify(auth_manager=auth_manager)
+# --- Refresh token if needed ---
+if auth_manager.is_token_expired(st.session_state["token_info"]):
+    st.session_state["token_info"] = auth_manager.refresh_access_token(
+        st.session_state["token_info"]["refresh_token"]
+    )
+
+# --- Create Spotify client ---
+sp = spotipy.Spotify(auth=st.session_state["token_info"]["access_token"])
+
+# --- Debug: show current user ---
+me = sp.current_user()
+st.success(f"✅ Logged in as: {me['display_name']}")
 
 
 # -----------------------------
