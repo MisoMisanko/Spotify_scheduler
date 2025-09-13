@@ -1,5 +1,6 @@
-streamlit
-spotipy
-numpy
-pandas
-python-dotenv
+streamlit==1.38.0
+spotipy==2.23.0
+numpy==1.26.4
+pandas==2.2.2
+matplotlib==3.9.2
+python-dotenv==1.0.1
