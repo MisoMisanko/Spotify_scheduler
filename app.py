@@ -20,7 +20,6 @@ CLIENT_ID = os.environ["SPOTIPY_CLIENT_ID"]
 CLIENT_SECRET = os.environ["SPOTIPY_CLIENT_SECRET"]
 REDIRECT_URI = os.environ["SPOTIPY_REDIRECT_URI"]
 
-
 st.set_page_config(page_title="Festival Personality App", page_icon="🎧", layout="centered")
 st.title("🎧 Festival Personality App")
 
@@ -29,8 +28,10 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     client_secret=CLIENT_SECRET,
     redirect_uri=REDIRECT_URI,
     scope=SCOPES,
-    cache_path=".cache"
+    cache_path=".cache",
+    open_browser=False   # 👈 prevents auto-opening localhost server
 ))
+
 
 # -----------------------------
 # Helpers
