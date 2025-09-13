@@ -29,7 +29,8 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     redirect_uri=REDIRECT_URI,
     scope=SCOPES,
     cache_path=".cache",
-    open_browser=False   # 👈 prevents auto-opening localhost server
+    open_browser=False,    # 👈 stops trying localhost
+    show_dialog=True       # 👈 forces login each time (good for testing)
 ))
 
 
