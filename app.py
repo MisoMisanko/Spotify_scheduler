@@ -35,10 +35,13 @@ auth_manager = SpotifyOAuth(
     show_dialog=True
 )
 
+if not auth_manager.get_cached_token():
+    st.warning("⚠️ You are not logged in yet. Please click the login link above.")
+    st.write("Auth URL:", auth_manager.get_authorize_url())
+    st.stop()
+
 sp = spotipy.Spotify(auth_manager=auth_manager)
 
-# Debug: print login URL
-st.write("Auth URL:", auth_manager.get_authorize_url())
 
 # -----------------------------
 # Helpers
