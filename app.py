@@ -29,10 +29,11 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     redirect_uri=REDIRECT_URI,
     scope=SCOPES,
     cache_path=".cache",
-    open_browser=False,    # 👈 stops trying localhost
-    show_dialog=True       # 👈 forces login each time (good for testing)
+    open_browser=False,
+    show_dialog=True    # 👈 this forces a fresh login every time
 ))
 
+st.write("Auth URL:", auth_manager.get_authorize_url())
 
 # -----------------------------
 # Helpers
