@@ -355,15 +355,7 @@ if st.button("🔎 Analyze my Spotify"):
         unsafe_allow_html=True
     )
 
-    st.subheader("🎶 Festival Recommendations")
-    recs = []
-    recs.append("🎨 Explore discovery zones & art installations" if traits["Openness"]>0.6
-                else "🎤 Stick with headliners & familiar stages")
-    recs.append("💃 Join big dance tents & group activities" if traits["Extraversion"]>0.6
-                else "🧘 Relax in acoustic/chill-out areas")
-    recs.append("📅 Plan workshops & follow a structured schedule" if traits["Conscientiousness"]>0.6
-                else "✨ Go with the flow & explore pop-up events")
-    for r in recs: st.markdown(f"- {r}")
+
 
     with st.expander("🔍 See raw analysis signals"):
         st.json({k: round(v,3) for k, v in signals.items()})
