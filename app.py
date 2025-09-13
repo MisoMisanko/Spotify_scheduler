@@ -16,9 +16,10 @@ load_dotenv()  # this reads .env automatically
 # Config & Auth
 # -----------------------------
 SCOPES = "user-top-read playlist-read-private user-library-read user-follow-read"
-CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
+CLIENT_ID = os.environ["SPOTIPY_CLIENT_ID"]
+CLIENT_SECRET = os.environ["SPOTIPY_CLIENT_SECRET"]
+REDIRECT_URI = os.environ["SPOTIPY_REDIRECT_URI"]
+
 
 st.set_page_config(page_title="Festival Personality App", page_icon="🎧", layout="centered")
 st.title("🎧 Festival Personality App")
