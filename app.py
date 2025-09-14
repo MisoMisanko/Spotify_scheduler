@@ -83,20 +83,39 @@ def ensure_spotify_client() -> spotipy.Spotify:
 # -----------------------------
 # Helpers
 # -----------------------------
-def enrich_artists(sp, artists):
-    """Fetch missing genres/popularity/followers for artists with incomplete data."""
-    enriched = []
-    for a in artists:
-        if not a.get("genres") or not a.get("popularity"):
-            try:
-                full = sp.artist(a["id"])
-                a["genres"] = full.get("genres", [])
-                a["popularity"] = full.get("popularity", a.get("popularity"))
-                a["followers"] = full.get("followers", {}).get("total", a.get("followers", 0))
-            except Exception:
-                pass
-        enriched.append(a)
-    return enriched
+def fetch_enriched_data(sp):
+    # Top tracks and artists
+    top_tracks = sp.current_user_top_tracks(limit=30, time_range="medium_term")["items"]
+    top_artists = sp.current_user_top_artists(limit=30, time_range="medium_term")["items"]
+
+    # Collect all unique artist IDs from both
+    artist_ids = set()
+    for t in top_tracks:
+        for a in t.get("artists", []):
+            if a.get("id"):
+                artist_ids.add(a["id"])
+    for a in top_artists:
+        if a.get("id"):
+            artist_ids.add(a["id"])
+
+    # Enrich every artist with full Spotify data
+    artist_details = {}
+    for i in range(0, len(artist_ids), 50):
+        batch = list(artist_ids)[i:i+50]
+        try:
+            results = sp.artists(batch)["artists"]
+            for a in results:
+                artist_details[a["id"]] = {
+                    "name": a.get("name"),
+                    "genres": a.get("genres", []),
+                    "popularity": a.get("popularity", 0),
+                    "followers": a.get("followers", {}).get("total", 0)
+                }
+        except Exception:
+            continue
+
+    return top_tracks, artist_details
+
 
 def clean_track(t):
     return {
