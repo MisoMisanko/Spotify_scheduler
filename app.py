@@ -344,9 +344,13 @@ if st.button("🔎 Analyze my Spotify"):
                                 traits["Agreeableness"], traits["Conscientiousness"])
 
     st.subheader("🎭 Personality scores")
-    cols = st.columns(4)
+   # Create as many columns as there are traits
+    cols = st.columns(len(traits))
+
     for i, (k, v) in enumerate(traits.items()):
-        with cols[i]: st.metric(k, f"{v:.2f}")
+        with cols[i]:
+            st.metric(k, f"{v:.2f}")
+
 
     # Radar chart
     labels = list(traits.keys())
