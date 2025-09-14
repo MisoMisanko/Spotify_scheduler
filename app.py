@@ -159,42 +159,15 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
         return st.session_state["spotify_data"]
 
     data = {}
-    time_ranges = ["short_term", "medium_term", "long_term"]
 
-    data["top_tracks"]  = {tr: sp.current_user_top_tracks(limit=20, time_range=tr).get("items", []) for tr in time_ranges}
-    data["top_artists"] = {tr: sp.current_user_top_artists(limit=20, time_range=tr).get("items", []) for tr in time_ranges}
+    # Only medium term data for simplicity
+    data["top_tracks"]  = sp.current_user_top_tracks(limit=30, time_range="medium_term").get("items", [])
+    data["top_artists"] = sp.current_user_top_artists(limit=30, time_range="medium_term").get("items", [])
 
-    saved = []
-    try:
-        results = sp.current_user_saved_tracks(limit=50)
-        while results:
-            saved.extend([it["track"] for it in results.get("items", []) if "track" in it])
-            if results.get("next"):
-                results = sp.next(results)
-            else:
-                break
-    except Exception:
-        pass
-    data["saved_tracks"] = saved
-
-    playlists = []
-    try:
-        results = sp.current_user_playlists(limit=50)
-        while results:
-            playlists.extend(results.get("items", []))
-            if results.get("next"):
-                results = sp.next(results)
-            else:
-                break
-    except Exception:
-        pass
-    data["playlists"] = playlists
-
+    # Collect artist IDs
     artist_ids = set()
-    for tr in time_ranges:
-        artist_ids.update([a.get("id") for a in data["top_artists"][tr]])
-        artist_ids.update(safe_artist_ids(data["top_tracks"][tr]))
-    artist_ids.update(safe_artist_ids(data["saved_tracks"]))
+    artist_ids.update([a.get("id") for a in data["top_artists"]])
+    artist_ids.update(safe_artist_ids(data["top_tracks"]))
     artist_ids = [a for a in artist_ids if a]
 
     artist_details = {}
@@ -214,39 +187,30 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
     st.session_state["spotify_data"] = data
     return data
 
+
 def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
     signals = {}
 
-    unique_tracks = []
-    seen = set()
-    for v in data["top_tracks"].values():
-        for t in v:
-            tid = t.get("id")
-            if tid and tid not in seen:
-                unique_tracks.append(t); seen.add(tid)
-    for t in data.get("saved_tracks", []):
-        tid = t.get("id")
-        if tid and tid not in seen:
-            unique_tracks.append(t); seen.add(tid)
-
-    track_ids = [t["id"] for t in data["top_tracks"]["medium_term"] if t.get("id")]
+    # Track IDs from top tracks
+    track_ids = [t["id"] for t in data["top_tracks"] if t.get("id")]
     features = []
     for b in batch(track_ids, 50):
         try:
             feats = sp.audio_features(b)
-            if feats: features.extend(feats)
+            if feats: features.extend([f for f in feats if f])
         except Exception:
             features = []
             break
 
     if features:
-        signals["avg_energy"]  = float(np.mean([f["energy"]  for f in features if f and f.get("energy")  is not None]))
-        signals["avg_valence"] = float(np.mean([f["valence"] for f in features if f and f.get("valence") is not None]))
+        signals["avg_energy"]  = float(np.mean([f["energy"] for f in features if f.get("energy") is not None]))
+        signals["avg_valence"] = float(np.mean([f["valence"] for f in features if f.get("valence") is not None]))
     else:
         signals["avg_energy"]  = 0.5
         signals["avg_valence"] = 0.5
         st.warning("No audio features found; using defaults.", icon="⚠️")
 
+    # Artist genres & stats
     artist_genres, artist_pops, artist_follows = [], [], []
     for det in data["artist_details"].values():
         artist_pops.append(det.get("popularity", 0))
@@ -255,35 +219,10 @@ def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
 
     genre_counter = Counter([g.lower() for g in artist_genres])
     signals["genre_entropy"]   = shannon_entropy(genre_counter)
-    unique_genres              = len(genre_counter)
-    total_genres               = sum(genre_counter.values())
-    signals["genre_diversity"] = unique_genres / total_genres if total_genres else 0.0
+    signals["genre_diversity"] = len(genre_counter)/sum(genre_counter.values()) if genre_counter else 0.0
 
     signals["avg_artist_popularity"] = float(np.mean(artist_pops)) if artist_pops else 0.0
-    signals["niche_artist_share"]    = (sum(1 for p in artist_pops if p < 40) / len(artist_pops)) if artist_pops else 0.0
     signals["long_tail_share"]       = (sum(1 for f in artist_follows if f < 100_000) / len(artist_follows)) if artist_follows else 0.0
-
-    durations_min = [t.get("duration_ms", 0)/60000 for t in unique_tracks if t.get("duration_ms")]
-    signals["avg_duration_min"] = float(np.mean(durations_min)) if durations_min else 0.0
-    signals["long_track_share"] = (sum(1 for d in durations_min if d >= 6.0)/len(durations_min)) if durations_min else 0.0
-
-    years = []
-    for t in unique_tracks:
-        y = year_from_release_date(t.get("album", {}).get("release_date"))
-        if y: years.append(y)
-    current_year = datetime.utcnow().year
-    signals["recency_share"] = (sum(1 for y in years if (current_year - y) <= 2)/len(years)) if years else 0.0
-
-    short_ids = {a.get("id") for a in data["top_artists"].get("short_term", [])}
-    long_ids  = {a.get("id") for a in data["top_artists"].get("long_term", [])}
-    inter     = len(short_ids & long_ids)
-    union     = max(1, len(short_ids | long_ids))
-    signals["stability_index"] = inter/union
-    signals["novelty_index"]   = 1 - signals["stability_index"]
-
-    pls = data.get("playlists", [])
-    collab_count = sum(1 for p in pls if p.get("collaborative"))
-    signals["collab_playlist_ratio"] = (collab_count/len(pls)) if pls else 0.0
 
     buckets = genre_bucket_counts(list(genre_counter.keys()))
     total_bucket = max(1, buckets.get("total", 0))
@@ -292,6 +231,7 @@ def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
     signals["dancepop_ratio"]   = buckets.get("dancepop", 0) / total_bucket
 
     return signals
+
 
 def compute_traits(signals: dict) -> dict[str, float]:
     openness = (
