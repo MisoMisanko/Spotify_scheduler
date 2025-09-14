@@ -155,6 +155,37 @@ def ensure_spotify_client() -> spotipy.Spotify:
 # Data collection
 # -----------------------------
 def fetch_user_data(sp: spotipy.Spotify) -> dict:
+    st.subheader("🔎 Debugging Spotify Data")
+
+# Show your display name
+me = sp.current_user()
+st.write("Logged in as:", me.get("display_name"), "-", me.get("id"))
+
+# Top tracks
+st.write("Top tracks (short term):")
+for t in data["top_tracks"]["short_term"][:5]:
+    st.write("-", t["name"], "by", ", ".join(a["name"] for a in t["artists"]))
+
+# Top artists
+st.write("Top artists (short term):")
+for a in data["top_artists"]["short_term"][:5]:
+    st.write("-", a["name"], "Genres:", a.get("genres", []))
+
+# Saved tracks
+st.write("Saved tracks (sample):")
+for t in data["saved_tracks"][:5]:
+    st.write("-", t["name"], "by", ", ".join(a["name"] for a in t["artists"]))
+
+# Recently played (needs extra scope: user-read-recently-played)
+try:
+    recent = sp.current_user_recently_played(limit=5).get("items", [])
+    st.write("Recently played:")
+    for r in recent:
+        track = r["track"]
+        st.write("-", track["name"], "by", ", ".join(a["name"] for a in track["artists"]))
+except Exception as e:
+    st.warning(f"Could not fetch recently played: {e}")
+
     data = {}
     time_ranges = ["short_term", "medium_term", "long_term"]
 
