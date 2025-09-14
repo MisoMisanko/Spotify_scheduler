@@ -233,6 +233,23 @@ def compute_signals(data: dict) -> dict:
         if tid and tid not in seen:
             unique_tracks.append(t); seen.add(tid)
 
+    # Fetch audio features for top tracks
+    track_ids = [t["id"] for t in data["top_tracks"]["medium_term"] if t.get("id")]
+    features = []
+    for b in batch(track_ids, 50):
+        try:
+            features.extend(sp.audio_features(b))
+        except Exception:
+            pass
+
+    if features:
+        signals["avg_energy"] = float(np.mean([f["energy"] for f in features if f]))
+        signals["avg_valence"] = float(np.mean([f["valence"] for f in features if f]))
+    else:
+        signals["avg_energy"] = 0.0
+        signals["avg_valence"] = 0.0
+
+
     # Artist fields
     artist_genres, artist_pops, artist_follows = [], [], []
     for det in data["artist_details"].values():
@@ -288,34 +305,44 @@ def compute_signals(data: dict) -> dict:
     return signals
 
 def compute_traits(signals: dict) -> dict[str, float]:
+    """
+    Convert raw signals into more spread-out trait scores.
+    Ranges have been tightened based on typical Spotify data.
+    """
+
+    # Openness: entropy + diversity + novelty + long tracks
     openness = (
-        0.35 * normalize(signals["genre_entropy"], 4.0, 7.0) +
-        0.25 * normalize(signals["novelty_index"], 0.2, 0.8) +
-        0.25 * normalize(signals["recency_share"], 0.2, 0.8) +
-        0.15 * normalize(signals["long_track_share"], 0.0, 0.3)
+        0.4 * normalize(signals["genre_entropy"], 5.5, 7.5) +
+        0.3 * normalize(signals["genre_diversity"], 0.4, 0.8) +
+        0.2 * normalize(signals["novelty_index"], 0.2, 0.8) +
+        0.1 * normalize(signals["long_track_share"], 0.0, 0.3)
     )
+
+    # Extraversion: popularity + recency + dancepop
     extraversion = (
-        0.4 * normalize(signals["dancepop_ratio"], 0.0, 0.4) +
-        0.3 * normalize(signals["avg_artist_popularity"], 40.0, 70.0) +
-        0.3 * normalize(signals["collab_playlist_ratio"], 0.0, 0.5)
+        0.4 * normalize(signals["avg_artist_popularity"], 30.0, 80.0) +
+        0.3 * normalize(signals["recency_share"], 0.1, 0.7) +
+        0.3 * normalize(signals["dancepop_ratio"], 0.0, 0.4)
     )
+
+    # Agreeableness: mellow vs aggressive, less smoothing
     agreeableness = (
-        0.5 * normalize(signals["mellow_ratio"], 0.0, 0.3) -
-        0.3 * normalize(signals["aggressive_ratio"], 0.0, 0.3) +
-        0.2 * (1.0 - normalize(signals["long_tail_share"], 0.0, 0.6))
+        0.6 * normalize(signals["mellow_ratio"] - signals["aggressive_ratio"], -0.3, 0.3) +
+        0.4 * (1.0 - normalize(signals["long_tail_share"], 0.1, 0.6))  # avoid extremes
     )
+
+    # Conscientiousness: stability vs novelty, less collapse
     conscientiousness = (
-        0.6 * normalize(signals["stability_index"], 0.0, 0.8) +
-        0.4 * (1 - normalize(signals["novelty_index"], 0.0, 1.0))
+        0.5 * normalize(signals["stability_index"], 0.1, 0.8) +
+        0.3 * (1.0 - normalize(signals["long_track_share"], 0.0, 0.2)) +
+        0.2 * normalize(signals["collab_playlist_ratio"], 0.0, 0.4)
     )
-    energy = normalize(
-        signals["dancepop_ratio"] + signals["aggressive_ratio"] - signals["mellow_ratio"],
-        -0.3, 0.5
-    )
-    mainstream = normalize(
-        signals["avg_artist_popularity"] - 100 * signals["niche_artist_share"],
-        -20, 40
-    )
+
+    # Energy (NEW): based on audio features
+    energy = normalize(signals.get("avg_energy", 0.0), 0.3, 0.9)
+
+    # Positivity (NEW): valence measure
+    positivity = normalize(signals.get("avg_valence", 0.0), 0.2, 0.8)
 
     return {
         "Openness": openness,
@@ -323,8 +350,9 @@ def compute_traits(signals: dict) -> dict[str, float]:
         "Agreeableness": agreeableness,
         "Conscientiousness": conscientiousness,
         "Energy": energy,
-        "Mainstream": mainstream,
+        "Positivity": positivity
     }
+
 
 
 # -----------------------------
