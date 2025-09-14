@@ -287,32 +287,45 @@ def compute_signals(data: dict) -> dict:
 
     return signals
 
-def compute_traits(signals: dict) -> dict:
+def compute_traits(signals: dict) -> dict[str, float]:
     openness = (
-        0.45 * normalize(signals["genre_entropy"], 0.0, 8.0) +
-        0.25 * normalize(signals["genre_diversity"], 0.0, 0.7) +
-        0.15 * normalize(signals["long_track_share"], 0.0, 0.5) +
-        0.15 * normalize(signals["novelty_index"], 0.0, 1.0)
+        0.35 * normalize(signals["genre_entropy"], 4.0, 7.0) +
+        0.25 * normalize(signals["novelty_index"], 0.2, 0.8) +
+        0.25 * normalize(signals["recency_share"], 0.2, 0.8) +
+        0.15 * normalize(signals["long_track_share"], 0.0, 0.3)
     )
     extraversion = (
-        0.50 * normalize(signals["avg_artist_popularity"], 20.0, 80.0) +
-        0.25 * normalize(signals["collab_playlist_ratio"], 0.0, 0.5) +
-        0.25 * normalize(signals["recency_share"], 0.0, 0.8)
+        0.4 * normalize(signals["dancepop_ratio"], 0.0, 0.4) +
+        0.3 * normalize(signals["avg_artist_popularity"], 40.0, 70.0) +
+        0.3 * normalize(signals["collab_playlist_ratio"], 0.0, 0.5)
     )
     agreeableness = (
-        0.65 * normalize(signals["mellow_ratio"] - signals["aggressive_ratio"], -0.5, 0.5) +
-        0.35 * normalize(signals["dancepop_ratio"], 0.0, 0.5)
+        0.5 * normalize(signals["mellow_ratio"], 0.0, 0.3) -
+        0.3 * normalize(signals["aggressive_ratio"], 0.0, 0.3) +
+        0.2 * (1.0 - normalize(signals["long_tail_share"], 0.0, 0.6))
     )
     conscientiousness = (
-        0.7 * normalize(signals["stability_index"], 0.0, 1.0) +
-        0.3 * (1 - normalize(signals["long_track_share"], 0.0, 0.5))
+        0.6 * normalize(signals["stability_index"], 0.0, 0.8) +
+        0.4 * (1 - normalize(signals["novelty_index"], 0.0, 1.0))
     )
+    energy = normalize(
+        signals["dancepop_ratio"] + signals["aggressive_ratio"] - signals["mellow_ratio"],
+        -0.3, 0.5
+    )
+    mainstream = normalize(
+        signals["avg_artist_popularity"] - 100 * signals["niche_artist_share"],
+        -20, 40
+    )
+
     return {
         "Openness": openness,
         "Extraversion": extraversion,
         "Agreeableness": agreeableness,
-        "Conscientiousness": conscientiousness
+        "Conscientiousness": conscientiousness,
+        "Energy": energy,
+        "Mainstream": mainstream,
     }
+
 
 # -----------------------------
 # Auth: get a working client
