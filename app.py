@@ -81,14 +81,14 @@ def ensure_spotify_client() -> spotipy.Spotify:
 
 
 # -----------------------------
-# Helpers
+# Data Fetch + Enrichment
 # -----------------------------
 def fetch_enriched_data(sp):
-    # Top tracks and artists
+    # Pull top tracks & top artists
     top_tracks = sp.current_user_top_tracks(limit=30, time_range="medium_term")["items"]
     top_artists = sp.current_user_top_artists(limit=30, time_range="medium_term")["items"]
 
-    # Collect all unique artist IDs from both
+    # Collect all unique artist IDs
     artist_ids = set()
     for t in top_tracks:
         for a in t.get("artists", []):
@@ -98,10 +98,11 @@ def fetch_enriched_data(sp):
         if a.get("id"):
             artist_ids.add(a["id"])
 
-    # Enrich every artist with full Spotify data
+    # Enrich artists
     artist_details = {}
+    artist_ids = list(artist_ids)
     for i in range(0, len(artist_ids), 50):
-        batch = list(artist_ids)[i:i+50]
+        batch = artist_ids[i:i+50]
         try:
             results = sp.artists(batch)["artists"]
             for a in results:
@@ -125,19 +126,6 @@ def clean_track(t):
         "release_date": t.get("album", {}).get("release_date")
     }
 
-def clean_artist(a):
-    followers = a.get("followers", 0)
-    if isinstance(followers, dict):
-        followers = followers.get("total", 0)
-
-    return {
-        "name": a.get("name"),
-        "genres": a.get("genres", []),
-        "popularity": a.get("popularity"),
-        "followers": followers
-    }
-
-
 
 # -----------------------------
 # Main
@@ -148,24 +136,20 @@ if st.button("🔎 Pull my Spotify data"):
     with st.spinner("Fetching your Spotify data..."):
         top_tracks, artist_details = fetch_enriched_data(sp)
 
-
+    # Display tracks
     st.subheader("🎵 Top Tracks (medium term)")
     for t in top_tracks:
         track_info = clean_track(t)
         st.write(f"- {track_info['name']} — {', '.join(track_info['artists'])} "
                  f"(Album: {track_info['album']}, Release: {track_info['release_date']})")
 
-    st.subheader("🎤 Top Artists (medium term)")
-    for a in top_artists:
-        artist_info = clean_artist(a)
-        genres = ", ".join(artist_info["genres"]) if artist_info["genres"] else "N/A"
-        st.write(f"- {artist_info['name']} "
-                 f"(Genres: {genres} | Popularity: {artist_info['popularity']} | Followers: {artist_info['followers']})")
-
-    st.subheader("🎤 Enriched Artists (from tracks + top artists)")
+    # Display enriched artists
+    st.subheader("🎤 Enriched Artists (tracks + top artists)")
     for a in artist_details.values():
         genres = ", ".join(a["genres"]) if a["genres"] else "N/A"
-        st.write(f"- {a['name']} (Genres: {genres} | Popularity: {a['popularity']} | Followers: {a['followers']})")
+        st.write(f"- {a['name']} "
+                 f"(Genres: {genres} | Popularity: {a['popularity']} | Followers: {a['followers']})")
 
+    # Raw data expander
     with st.expander("📦 Raw JSON"):
-        st.json({"top_tracks": top_tracks, "top_artists": top_artists})
+        st.json({"top_tracks": top_tracks, "artist_details": artist_details})
