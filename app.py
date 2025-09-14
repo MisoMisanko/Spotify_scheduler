@@ -146,11 +146,8 @@ sp = ensure_spotify_client()
 
 if st.button("🔎 Pull my Spotify data"):
     with st.spinner("Fetching your Spotify data..."):
-        top_tracks = sp.current_user_top_tracks(limit=20, time_range="medium_term")["items"]
-        top_artists = sp.current_user_top_artists(limit=20, time_range="medium_term")["items"]
+        top_tracks, artist_details = fetch_enriched_data(sp)
 
-        # Enrich artist info
-        top_artists = enrich_artists(sp, top_artists)
 
     st.subheader("🎵 Top Tracks (medium term)")
     for t in top_tracks:
@@ -164,6 +161,11 @@ if st.button("🔎 Pull my Spotify data"):
         genres = ", ".join(artist_info["genres"]) if artist_info["genres"] else "N/A"
         st.write(f"- {artist_info['name']} "
                  f"(Genres: {genres} | Popularity: {artist_info['popularity']} | Followers: {artist_info['followers']})")
+
+    st.subheader("🎤 Enriched Artists (from tracks + top artists)")
+    for a in artist_details.values():
+        genres = ", ".join(a["genres"]) if a["genres"] else "N/A"
+        st.write(f"- {a['name']} (Genres: {genres} | Popularity: {a['popularity']} | Followers: {a['followers']})")
 
     with st.expander("📦 Raw JSON"):
         st.json({"top_tracks": top_tracks, "top_artists": top_artists})
