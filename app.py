@@ -1,3 +1,4 @@
+# app.py
 import os
 import math
 from collections import Counter, defaultdict
@@ -9,7 +10,12 @@ import streamlit as st
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-# Optional: load from .env for local dev
+# ML
+from sklearn.linear_model import Ridge
+from sklearn.multioutput import MultiOutputRegressor
+import pandas as pd
+
+# Optional: dotenv for local dev
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -25,32 +31,27 @@ CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")
 
-st.set_page_config(page_title="Festival Personality App", page_icon="🎧", layout="centered")
-st.title("🎧 Festival Personality App")
+st.set_page_config(page_title="Festival Personality App (AI)", page_icon="🎧", layout="centered")
+st.title("🎧 Festival Personality App — Heuristics + AI")
 
 if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
-    st.error(
-        "Missing Spotify credentials. Set SPOTIPY_CLIENT_ID, "
-        "SPOTIPY_CLIENT_SECRET and SPOTIPY_REDIRECT_URI in your secrets/env."
-    )
+    st.error("Missing Spotify credentials. Set SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET and SPOTIPY_REDIRECT_URI.")
     st.stop()
 
 # -----------------------------
 # Small utilities
 # -----------------------------
 def get_query_params():
-    """Compatible getter for Streamlit query params across versions."""
     try:
         return dict(st.query_params)  # Streamlit ≥1.31
     except Exception:
-        return st.experimental_get_query_params()  # older
+        return st.experimental_get_query_params()
 
 def clear_query_params():
-    """Clear query params after token exchange to avoid loop/rerun issues."""
     try:
-        st.query_params.clear()  # Streamlit ≥1.31
+        st.query_params.clear()
     except Exception:
-        st.experimental_set_query_params()  # older (sets to empty)
+        st.experimental_set_query_params()
 
 def shannon_entropy(counter: Counter) -> float:
     total = sum(counter.values())
@@ -113,49 +114,38 @@ def get_auth_manager():
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
         scope=SCOPES,
-        cache_path=".cache",     # ok for local dev; Cloud stores ephemeral copy
-        open_browser=False,      # critical for Streamlit Cloud
-        show_dialog=True         # helpful for incognito / fresh sessions
+        cache_path=".cache",
+        open_browser=False,
+        show_dialog=True
     )
 
 def ensure_spotify_client() -> spotipy.Spotify:
-    """
-    Returns a ready-to-use spotipy.Spotify client.
-    Handles first-time login, token exchange, refresh, and query param cleanup.
-    """
     auth_manager = get_auth_manager()
 
-    # 1) If we already have a token in session and it's valid → use it
     token_info = st.session_state.get("token_info")
     if token_info and not auth_manager.is_token_expired(token_info):
         return spotipy.Spotify(auth=token_info["access_token"])
 
-    # 2) If we have a token but it's expired → refresh it
     if token_info and auth_manager.is_token_expired(token_info):
         try:
-            st.session_state["token_info"] = auth_manager.refresh_access_token(
-                token_info["refresh_token"]
-            )
+            st.session_state["token_info"] = auth_manager.refresh_access_token(token_info["refresh_token"])
             return spotipy.Spotify(auth=st.session_state["token_info"]["access_token"])
-        except Exception as e:
-            # Fall back to login
+        except Exception:
             st.session_state.pop("token_info", None)
 
-    # 3) If Spotify just redirected back with ?code=... → exchange it
     params = get_query_params()
     if "code" in params:
         code = params["code"][0] if isinstance(params["code"], list) else params["code"]
         try:
             token_info = auth_manager.get_access_token(code)
             st.session_state["token_info"] = token_info
-            clear_query_params()   # remove ?code=... to prevent loop
-            st.rerun()             # rerender with clean URL & token in state
+            clear_query_params()
+            st.rerun()
         except Exception as e:
             st.error(f"Could not complete Spotify login: {e}")
             clear_query_params()
             st.stop()
 
-    # 4) Otherwise → show login link and stop
     login_url = auth_manager.get_authorize_url()
     st.info("You need to log in with Spotify to continue.")
     st.markdown(f"[Log in with Spotify]({login_url})")
@@ -168,11 +158,10 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
     data = {}
     time_ranges = ["short_term", "medium_term", "long_term"]
 
-    # Keep limits modest for speed
     data["top_tracks"]  = {tr: sp.current_user_top_tracks(limit=20, time_range=tr).get("items", []) for tr in time_ranges}
     data["top_artists"] = {tr: sp.current_user_top_artists(limit=20, time_range=tr).get("items", []) for tr in time_ranges}
 
-    # Saved tracks: cap at ~100 and avoid infinite paging
+    # Saved tracks: cap ~100
     saved = []
     try:
         results = sp.current_user_saved_tracks(limit=50)
@@ -184,13 +173,13 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
         pass
     data["saved_tracks"] = saved[:100]
 
-    # Playlists (first page only)
+    # Playlists first page
     try:
         data["playlists"] = sp.current_user_playlists(limit=20).get("items", [])
     except Exception:
         data["playlists"] = []
 
-    # Unique artist IDs across all sources
+    # Unique artists
     artist_ids = set()
     for tr in time_ranges:
         artist_ids.update([a.get("id") for a in data["top_artists"][tr]])
@@ -198,7 +187,7 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
     artist_ids.update(safe_artist_ids(data["saved_tracks"]))
     artist_ids = [a for a in artist_ids if a]
 
-    # Batch fetch artist details
+    # Artist details
     artist_details = {}
     for b in batch(artist_ids, 50):
         try:
@@ -217,7 +206,7 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
 # -----------------------------
 # Feature engineering
 # -----------------------------
-def compute_signals(data: dict) -> dict:
+def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
     signals = {}
 
     # Unique tracks
@@ -233,22 +222,25 @@ def compute_signals(data: dict) -> dict:
         if tid and tid not in seen:
             unique_tracks.append(t); seen.add(tid)
 
-    # Fetch audio features for top tracks
+    # Try audio features (may be restricted for new apps → 403)
     track_ids = [t["id"] for t in data["top_tracks"]["medium_term"] if t.get("id")]
     features = []
     for b in batch(track_ids, 50):
         try:
-            features.extend(sp.audio_features(b))
+            # If your app is restricted, this may raise an error
+            feats = sp.audio_features(b)
+            if feats: features.extend(feats)
         except Exception:
-            pass
+            features = []  # ensure empty on failure
+            break
 
     if features:
-        signals["avg_energy"] = float(np.mean([f["energy"] for f in features if f]))
-        signals["avg_valence"] = float(np.mean([f["valence"] for f in features if f]))
+        signals["avg_energy"]  = float(np.mean([f["energy"]  for f in features if f and f.get("energy")  is not None]))
+        signals["avg_valence"] = float(np.mean([f["valence"] for f in features if f and f.get("valence") is not None]))
     else:
-        signals["avg_energy"] = 0.0
-        signals["avg_valence"] = 0.0
-
+        # Fallback proxies if audio_features not available
+        signals["avg_energy"]  = 0.5 + 0.3*(0)  # neutral; you can craft a proxy from genre buckets if you want
+        signals["avg_valence"] = 0.5
 
     # Artist fields
     artist_genres, artist_pops, artist_follows = [], [], []
@@ -304,45 +296,33 @@ def compute_signals(data: dict) -> dict:
 
     return signals
 
+# -----------------------------
+# Heuristic traits (recalibrated)
+# -----------------------------
 def compute_traits(signals: dict) -> dict[str, float]:
-    """
-    Convert raw signals into more spread-out trait scores.
-    Ranges have been tightened based on typical Spotify data.
-    """
-
-    # Openness: entropy + diversity + novelty + long tracks
     openness = (
         0.4 * normalize(signals["genre_entropy"], 5.5, 7.5) +
         0.3 * normalize(signals["genre_diversity"], 0.4, 0.8) +
         0.2 * normalize(signals["novelty_index"], 0.2, 0.8) +
         0.1 * normalize(signals["long_track_share"], 0.0, 0.3)
     )
-
-    # Extraversion: popularity + recency + dancepop
     extraversion = (
         0.4 * normalize(signals["avg_artist_popularity"], 30.0, 80.0) +
         0.3 * normalize(signals["recency_share"], 0.1, 0.7) +
         0.3 * normalize(signals["dancepop_ratio"], 0.0, 0.4)
     )
-
-    # Agreeableness: mellow vs aggressive, less smoothing
     agreeableness = (
         0.6 * normalize(signals["mellow_ratio"] - signals["aggressive_ratio"], -0.3, 0.3) +
-        0.4 * (1.0 - normalize(signals["long_tail_share"], 0.1, 0.6))  # avoid extremes
+        0.4 * (1.0 - normalize(signals["long_tail_share"], 0.1, 0.6))
     )
-
-    # Conscientiousness: stability vs novelty, less collapse
     conscientiousness = (
         0.5 * normalize(signals["stability_index"], 0.1, 0.8) +
         0.3 * (1.0 - normalize(signals["long_track_share"], 0.0, 0.2)) +
         0.2 * normalize(signals["collab_playlist_ratio"], 0.0, 0.4)
     )
-
-    # Energy (NEW): based on audio features
-    energy = normalize(signals.get("avg_energy", 0.0), 0.3, 0.9)
-
-    # Positivity (NEW): valence measure
-    positivity = normalize(signals.get("avg_valence", 0.0), 0.2, 0.8)
+    # Extras from audio features (or fallback)
+    energy     = normalize(signals.get("avg_energy", 0.5), 0.3, 0.9)
+    positivity = normalize(signals.get("avg_valence", 0.5), 0.2, 0.8)
 
     return {
         "Openness": openness,
@@ -353,32 +333,99 @@ def compute_traits(signals: dict) -> dict[str, float]:
         "Positivity": positivity
     }
 
+# -----------------------------
+# AI model: train & predict
+# -----------------------------
+FEATURE_COLUMNS = [
+    "genre_entropy","genre_diversity","novelty_index","long_track_share",
+    "avg_artist_popularity","recency_share","dancepop_ratio",
+    "mellow_ratio","aggressive_ratio","long_tail_share","stability_index",
+    "collab_playlist_ratio","avg_energy","avg_valence"
+]
+TARGET_COLUMNS = ["Openness","Extraversion","Agreeableness","Conscientiousness"]
 
+def build_feature_vector(signals: dict) -> np.ndarray:
+    return np.array([signals.get(c, 0.0) for c in FEATURE_COLUMNS], dtype=float)
+
+def ensure_ai_model():
+    """
+    Returns a trained MultiOutputRegressor(Ridge) if available in session_state,
+    otherwise None. You can train it below by uploading a CSV.
+    """
+    return st.session_state.get("ai_model")
+
+def train_ai_model(df: pd.DataFrame):
+    # Basic sanity: ensure required cols exist
+    missing_f = [c for c in FEATURE_COLUMNS if c not in df.columns]
+    missing_t = [c for c in TARGET_COLUMNS  if c not in df.columns]
+    if missing_f or missing_t:
+        raise ValueError(f"Missing columns. Features: {missing_f}, Targets: {missing_t}")
+
+    X = df[FEATURE_COLUMNS].values
+    y = df[TARGET_COLUMNS].values  # four traits
+
+    model = MultiOutputRegressor(Ridge(alpha=1.0, random_state=42))
+    model.fit(X, y)
+    st.session_state["ai_model"] = model
+    return model
 
 # -----------------------------
-# Auth: get a working client
+# Auth → client
 # -----------------------------
-sp = ensure_spotify_client()  # will stop with login link if not authenticated
+sp = ensure_spotify_client()
 
 # -----------------------------
-# UI
+# Sidebar: AI training
+# -----------------------------
+st.sidebar.header("🤖 AI Model")
+st.sidebar.write("Upload a CSV with columns:")
+st.sidebar.code(
+    ", ".join(FEATURE_COLUMNS + TARGET_COLUMNS),
+    language="text"
+)
+uploaded = st.sidebar.file_uploader("Upload training CSV", type=["csv"])
+if uploaded:
+    try:
+        df = pd.read_csv(uploaded)
+        model = train_ai_model(df)
+        st.sidebar.success("Model trained and stored in session.")
+    except Exception as e:
+        st.sidebar.error(f"Training failed: {e}")
+
+if st.sidebar.button("Clear trained model"):
+    st.session_state.pop("ai_model", None)
+    st.sidebar.info("Cleared.")
+
+# -----------------------------
+# Main UI
 # -----------------------------
 if st.button("🔎 Analyze my Spotify"):
     with st.spinner("Fetching your Spotify data and analysing it..."):
         data    = fetch_user_data(sp)
-        signals = compute_signals(data)
-        traits  = compute_traits(signals)
-        mbti    = classify_mbti(traits["Openness"], traits["Extraversion"],
-                                traits["Agreeableness"], traits["Conscientiousness"])
+        signals = compute_signals(sp, data)
 
+        # Try AI model first
+        model = ensure_ai_model()
+        if model is not None:
+            X = build_feature_vector(signals).reshape(1, -1)
+            preds = np.clip(model.predict(X).reshape(-1), 0.0, 1.0)
+            traits = {k: float(v) for k, v in zip(TARGET_COLUMNS, preds)}
+            # add the extra dimensions so your radar shows more spread
+            traits["Energy"]     = normalize(signals.get("avg_energy", 0.5), 0.3, 0.9)
+            traits["Positivity"] = normalize(signals.get("avg_valence", 0.5), 0.2, 0.8)
+            mode_used = "AI model (Ridge)"
+        else:
+            traits = compute_traits(signals)
+            mode_used = "Heuristic"
+
+        mbti = classify_mbti(traits["Openness"], traits["Extraversion"], traits["Agreeableness"], traits["Conscientiousness"])
+
+    st.caption(f"Mode: {mode_used}")
     st.subheader("🎭 Personality scores")
-   # Create as many columns as there are traits
     cols = st.columns(len(traits))
-
     for i, (k, v) in enumerate(traits.items()):
         with cols[i]:
             st.metric(k, f"{v:.2f}")
-
 
     # Radar chart
     labels = list(traits.keys())
@@ -395,12 +442,11 @@ if st.button("🔎 Analyze my Spotify"):
     st.markdown(
         f"""<div style='text-align:center; padding:20px; border-radius:10px;
         background-color:#f0f9f9; border:2px solid #00b3b3;'>
-        <h2 style='color:#007777;'>Your MBTI Type</h2>
+        <h2 style='color:#007777;'>MBTI (derived from traits)</h2>
         <h1 style='color:#00b3b3;'>{mbti}</h1></div>""",
         unsafe_allow_html=True
     )
 
+    with st.expander("🔍 Raw signals"):
+        st.json({k: round(float(v),3) for k, v in signals.items()})
 
-
-    with st.expander("🔍 See raw analysis signals"):
-        st.json({k: round(v,3) for k, v in signals.items()})

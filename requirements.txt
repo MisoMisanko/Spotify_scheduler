@@ -1,6 +1,7 @@
 streamlit
 spotipy
 numpy
-pandas
 matplotlib
+pandas
 python-dotenv
+scikit-learn
