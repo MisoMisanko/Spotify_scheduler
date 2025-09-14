@@ -23,6 +23,10 @@ if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
     st.error("Missing Spotify credentials. Set SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET and SPOTIPY_REDIRECT_URI.")
     st.stop()
 
+
+# -----------------------------
+# Auth
+# -----------------------------
 def get_auth_manager():
     return SpotifyOAuth(
         client_id=CLIENT_ID,
@@ -75,6 +79,45 @@ def ensure_spotify_client() -> spotipy.Spotify:
     st.markdown(f"[Log in with Spotify]({login_url})")
     st.stop()
 
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def enrich_artists(sp, artists):
+    """Fetch missing genres/popularity/followers for artists with incomplete data."""
+    enriched = []
+    for a in artists:
+        if not a.get("genres") or not a.get("popularity"):
+            try:
+                full = sp.artist(a["id"])
+                a["genres"] = full.get("genres", [])
+                a["popularity"] = full.get("popularity", a.get("popularity"))
+                a["followers"] = full.get("followers", {}).get("total", a.get("followers", 0))
+            except Exception:
+                pass
+        enriched.append(a)
+    return enriched
+
+def clean_track(t):
+    return {
+        "name": t.get("name"),
+        "artists": [a["name"] for a in t.get("artists", [])],
+        "album": t.get("album", {}).get("name"),
+        "release_date": t.get("album", {}).get("release_date")
+    }
+
+def clean_artist(a):
+    return {
+        "name": a.get("name"),
+        "genres": a.get("genres", []),
+        "popularity": a.get("popularity"),
+        "followers": a.get("followers", {}).get("total", 0)
+    }
+
+
+# -----------------------------
+# Main
+# -----------------------------
 sp = ensure_spotify_client()
 
 if st.button("🔎 Pull my Spotify data"):
@@ -82,13 +125,21 @@ if st.button("🔎 Pull my Spotify data"):
         top_tracks = sp.current_user_top_tracks(limit=20, time_range="medium_term")["items"]
         top_artists = sp.current_user_top_artists(limit=20, time_range="medium_term")["items"]
 
+        # Enrich artist info
+        top_artists = enrich_artists(sp, top_artists)
+
     st.subheader("🎵 Top Tracks (medium term)")
     for t in top_tracks:
-        st.write(f"- {t['name']} — {', '.join([a['name'] for a in t['artists']])}")
+        track_info = clean_track(t)
+        st.write(f"- {track_info['name']} — {', '.join(track_info['artists'])} "
+                 f"(Album: {track_info['album']}, Release: {track_info['release_date']})")
 
     st.subheader("🎤 Top Artists (medium term)")
     for a in top_artists:
-        st.write(f"- {a['name']} (Genres: {', '.join(a['genres'])})")
+        artist_info = clean_artist(a)
+        genres = ", ".join(artist_info["genres"]) if artist_info["genres"] else "N/A"
+        st.write(f"- {artist_info['name']} "
+                 f"(Genres: {genres} | Popularity: {artist_info['popularity']} | Followers: {artist_info['followers']})")
 
     with st.expander("📦 Raw JSON"):
         st.json({"top_tracks": top_tracks, "top_artists": top_artists})
