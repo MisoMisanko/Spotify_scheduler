@@ -10,22 +10,20 @@ import streamlit as st
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-# ML
 from sklearn.linear_model import Ridge
 from sklearn.multioutput import MultiOutputRegressor
 import pandas as pd
 
-# Optional: dotenv for local dev
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-# -----------------------------
-# Config
-# -----------------------------
-SCOPES = "user-top-read playlist-read-private user-library-read user-follow-read"
+SCOPES = (
+    "user-top-read playlist-read-private user-library-read "
+    "user-follow-read user-read-recently-played"
+)
 
 CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
@@ -38,12 +36,9 @@ if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
     st.error("Missing Spotify credentials. Set SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET and SPOTIPY_REDIRECT_URI.")
     st.stop()
 
-# -----------------------------
-# Small utilities
-# -----------------------------
 def get_query_params():
     try:
-        return dict(st.query_params)  # Streamlit ≥1.31
+        return dict(st.query_params)
     except Exception:
         return st.experimental_get_query_params()
 
@@ -60,11 +55,13 @@ def shannon_entropy(counter: Counter) -> float:
     return -sum((c/total) * math.log((c/total) + 1e-12, 2) for c in counter.values())
 
 def normalize(x, lo, hi):
-    if hi <= lo: return 0.0
+    if hi <= lo:
+        return 0.0
     return max(0.0, min(1.0, (x - lo) / (hi - lo)))
 
 def year_from_release_date(rd: str):
-    if not rd: return None
+    if not rd:
+        return None
     try:
         return int(rd[:4])
     except Exception:
@@ -105,24 +102,30 @@ def classify_mbti(o, e, a, c):
     jp = "J" if c >= 0.5 else "P"
     return ei + ns + ft + jp
 
-# -----------------------------
-# OAuth & token management
-# -----------------------------
 def get_auth_manager():
     return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
         scope=SCOPES,
-        cache_path=".cache",
+        cache_path=None,
         open_browser=False,
         show_dialog=True
     )
 
+def _exchange_code(auth_manager, code):
+    try:
+        return auth_manager.get_access_token(code, as_dict=True)
+    except TypeError:
+        token = auth_manager.get_access_token(code)
+        if isinstance(token, dict):
+            return token
+        return {"access_token": token, "expires_at": None, "refresh_token": None, "scope": SCOPES}
+
 def ensure_spotify_client() -> spotipy.Spotify:
     auth_manager = get_auth_manager()
-
     token_info = st.session_state.get("token_info")
+
     if token_info and not auth_manager.is_token_expired(token_info):
         return spotipy.Spotify(auth=token_info["access_token"])
 
@@ -137,7 +140,7 @@ def ensure_spotify_client() -> spotipy.Spotify:
     if "code" in params:
         code = params["code"][0] if isinstance(params["code"], list) else params["code"]
         try:
-            token_info = auth_manager.get_access_token(code)
+            token_info = _exchange_code(auth_manager, code)
             st.session_state["token_info"] = token_info
             clear_query_params()
             st.rerun()
@@ -151,36 +154,42 @@ def ensure_spotify_client() -> spotipy.Spotify:
     st.markdown(f"[Log in with Spotify]({login_url})")
     st.stop()
 
-# -----------------------------
-# Data collection
-# -----------------------------
 def fetch_user_data(sp: spotipy.Spotify) -> dict:
+    if "spotify_data" in st.session_state:
+        return st.session_state["spotify_data"]
+
     data = {}
     time_ranges = ["short_term", "medium_term", "long_term"]
 
-    # Top tracks & artists
     data["top_tracks"]  = {tr: sp.current_user_top_tracks(limit=20, time_range=tr).get("items", []) for tr in time_ranges}
     data["top_artists"] = {tr: sp.current_user_top_artists(limit=20, time_range=tr).get("items", []) for tr in time_ranges}
 
-    # Saved tracks: cap ~100
     saved = []
     try:
         results = sp.current_user_saved_tracks(limit=50)
-        saved.extend([it["track"] for it in results.get("items", []) if "track" in it])
-        if results.get("next"):
-            results = sp.next(results)
+        while results:
             saved.extend([it["track"] for it in results.get("items", []) if "track" in it])
+            if results.get("next"):
+                results = sp.next(results)
+            else:
+                break
     except Exception:
         pass
-    data["saved_tracks"] = saved[:100]
+    data["saved_tracks"] = saved
 
-    # Playlists
+    playlists = []
     try:
-        data["playlists"] = sp.current_user_playlists(limit=20).get("items", [])
+        results = sp.current_user_playlists(limit=50)
+        while results:
+            playlists.extend(results.get("items", []))
+            if results.get("next"):
+                results = sp.next(results)
+            else:
+                break
     except Exception:
-        data["playlists"] = []
+        pass
+    data["playlists"] = playlists
 
-    # Artist details
     artist_ids = set()
     for tr in time_ranges:
         artist_ids.update([a.get("id") for a in data["top_artists"][tr]])
@@ -202,46 +211,12 @@ def fetch_user_data(sp: spotipy.Spotify) -> dict:
             continue
     data["artist_details"] = artist_details
 
+    st.session_state["spotify_data"] = data
     return data
 
-if st.button("🔎 Analyze my Spotify"):
-    with st.spinner("Fetching your Spotify data and analysing it..."):
-        data = fetch_user_data(sp)
-
-    st.subheader("🔎 Debugging Spotify Data")
-
-    me = sp.current_user()
-    st.write("Logged in as:", me.get("display_name"), "-", me.get("id"))
-
-    st.write("Top tracks (short term):")
-    for t in data["top_tracks"]["short_term"][:5]:
-        st.write("-", t["name"], "by", ", ".join(a["name"] for a in t["artists"]))
-
-    st.write("Top artists (short term):")
-    for a in data["top_artists"]["short_term"][:5]:
-        st.write("-", a["name"], "Genres:", a.get("genres", []))
-
-    st.write("Saved tracks (sample):")
-    for t in data["saved_tracks"][:5]:
-        st.write("-", t["name"], "by", ", ".join(a["name"] for a in t["artists"]))
-
-    try:
-        recent = sp.current_user_recently_played(limit=5).get("items", [])
-        st.write("Recently played:")
-        for r in recent:
-            track = r["track"]
-            st.write("-", track["name"], "by", ", ".join(a["name"] for a in track["artists"]))
-    except Exception as e:
-        st.warning(f"Could not fetch recently played: {e}")
-
-
-# -----------------------------
-# Feature engineering
-# -----------------------------
 def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
     signals = {}
 
-    # Unique tracks
     unique_tracks = []
     seen = set()
     for v in data["top_tracks"].values():
@@ -254,51 +229,44 @@ def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
         if tid and tid not in seen:
             unique_tracks.append(t); seen.add(tid)
 
-    # Try audio features (may be restricted for new apps → 403)
     track_ids = [t["id"] for t in data["top_tracks"]["medium_term"] if t.get("id")]
     features = []
     for b in batch(track_ids, 50):
         try:
-            # If your app is restricted, this may raise an error
             feats = sp.audio_features(b)
             if feats: features.extend(feats)
         except Exception:
-            features = []  # ensure empty on failure
+            features = []
             break
 
     if features:
         signals["avg_energy"]  = float(np.mean([f["energy"]  for f in features if f and f.get("energy")  is not None]))
         signals["avg_valence"] = float(np.mean([f["valence"] for f in features if f and f.get("valence") is not None]))
     else:
-        # Fallback proxies if audio_features not available
-        signals["avg_energy"]  = 0.5 + 0.3*(0)  # neutral; you can craft a proxy from genre buckets if you want
+        signals["avg_energy"]  = 0.5
         signals["avg_valence"] = 0.5
+        st.warning("No audio features found; using defaults.", icon="⚠️")
 
-    # Artist fields
     artist_genres, artist_pops, artist_follows = [], [], []
     for det in data["artist_details"].values():
         artist_pops.append(det.get("popularity", 0))
         artist_follows.append(det.get("followers", 0))
         artist_genres.extend(det.get("genres", []))
 
-    # Genre entropy & diversity
     genre_counter = Counter([g.lower() for g in artist_genres])
     signals["genre_entropy"]   = shannon_entropy(genre_counter)
     unique_genres              = len(genre_counter)
     total_genres               = sum(genre_counter.values())
     signals["genre_diversity"] = unique_genres / total_genres if total_genres else 0.0
 
-    # Popularity & long tail
     signals["avg_artist_popularity"] = float(np.mean(artist_pops)) if artist_pops else 0.0
     signals["niche_artist_share"]    = (sum(1 for p in artist_pops if p < 40) / len(artist_pops)) if artist_pops else 0.0
     signals["long_tail_share"]       = (sum(1 for f in artist_follows if f < 100_000) / len(artist_follows)) if artist_follows else 0.0
 
-    # Duration
     durations_min = [t.get("duration_ms", 0)/60000 for t in unique_tracks if t.get("duration_ms")]
     signals["avg_duration_min"] = float(np.mean(durations_min)) if durations_min else 0.0
     signals["long_track_share"] = (sum(1 for d in durations_min if d >= 6.0)/len(durations_min)) if durations_min else 0.0
 
-    # Recency (last 2y)
     years = []
     for t in unique_tracks:
         y = year_from_release_date(t.get("album", {}).get("release_date"))
@@ -306,7 +274,6 @@ def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
     current_year = datetime.utcnow().year
     signals["recency_share"] = (sum(1 for y in years if (current_year - y) <= 2)/len(years)) if years else 0.0
 
-    # Stability vs novelty
     short_ids = {a.get("id") for a in data["top_artists"].get("short_term", [])}
     long_ids  = {a.get("id") for a in data["top_artists"].get("long_term", [])}
     inter     = len(short_ids & long_ids)
@@ -314,12 +281,10 @@ def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
     signals["stability_index"] = inter/union
     signals["novelty_index"]   = 1 - signals["stability_index"]
 
-    # Collaborative playlists
     pls = data.get("playlists", [])
     collab_count = sum(1 for p in pls if p.get("collaborative"))
     signals["collab_playlist_ratio"] = (collab_count/len(pls)) if pls else 0.0
 
-    # Genre buckets
     buckets = genre_bucket_counts(list(genre_counter.keys()))
     total_bucket = max(1, buckets.get("total", 0))
     signals["mellow_ratio"]     = buckets.get("mellow", 0) / total_bucket
@@ -328,9 +293,6 @@ def compute_signals(sp: spotipy.Spotify, data: dict) -> dict:
 
     return signals
 
-# -----------------------------
-# Heuristic traits (recalibrated)
-# -----------------------------
 def compute_traits(signals: dict) -> dict[str, float]:
     openness = (
         0.4 * normalize(signals["genre_entropy"], 5.5, 7.5) +
@@ -352,7 +314,6 @@ def compute_traits(signals: dict) -> dict[str, float]:
         0.3 * (1.0 - normalize(signals["long_track_share"], 0.0, 0.2)) +
         0.2 * normalize(signals["collab_playlist_ratio"], 0.0, 0.4)
     )
-    # Extras from audio features (or fallback)
     energy     = normalize(signals.get("avg_energy", 0.5), 0.3, 0.9)
     positivity = normalize(signals.get("avg_valence", 0.5), 0.2, 0.8)
 
@@ -365,9 +326,6 @@ def compute_traits(signals: dict) -> dict[str, float]:
         "Positivity": positivity
     }
 
-# -----------------------------
-# AI model: train & predict
-# -----------------------------
 FEATURE_COLUMNS = [
     "genre_entropy","genre_diversity","novelty_index","long_track_share",
     "avg_artist_popularity","recency_share","dancepop_ratio",
@@ -380,46 +338,29 @@ def build_feature_vector(signals: dict) -> np.ndarray:
     return np.array([signals.get(c, 0.0) for c in FEATURE_COLUMNS], dtype=float)
 
 def ensure_ai_model():
-    """
-    Returns a trained MultiOutputRegressor(Ridge) if available in session_state,
-    otherwise None. You can train it below by uploading a CSV.
-    """
     return st.session_state.get("ai_model")
 
 def train_ai_model(df: pd.DataFrame):
-    # Basic sanity: ensure required cols exist
     missing_f = [c for c in FEATURE_COLUMNS if c not in df.columns]
     missing_t = [c for c in TARGET_COLUMNS  if c not in df.columns]
     if missing_f or missing_t:
         raise ValueError(f"Missing columns. Features: {missing_f}, Targets: {missing_t}")
-
     X = df[FEATURE_COLUMNS].values
-    y = df[TARGET_COLUMNS].values  # four traits
-
+    y = df[TARGET_COLUMNS].values
     model = MultiOutputRegressor(Ridge(alpha=1.0, random_state=42))
     model.fit(X, y)
     st.session_state["ai_model"] = model
     return model
 
-# -----------------------------
-# Auth → client
-# -----------------------------
-sp = ensure_spotify_client()
-
-# -----------------------------
-# Sidebar: AI training
-# -----------------------------
 st.sidebar.header("🤖 AI Model")
 st.sidebar.write("Upload a CSV with columns:")
-st.sidebar.code(
-    ", ".join(FEATURE_COLUMNS + TARGET_COLUMNS),
-    language="text"
-)
+st.sidebar.code(", ".join(FEATURE_COLUMNS + TARGET_COLUMNS), language="text")
+
 uploaded = st.sidebar.file_uploader("Upload training CSV", type=["csv"])
 if uploaded:
     try:
         df = pd.read_csv(uploaded)
-        model = train_ai_model(df)
+        _ = train_ai_model(df)
         st.sidebar.success("Model trained and stored in session.")
     except Exception as e:
         st.sidebar.error(f"Training failed: {e}")
@@ -428,21 +369,22 @@ if st.sidebar.button("Clear trained model"):
     st.session_state.pop("ai_model", None)
     st.sidebar.info("Cleared.")
 
-# -----------------------------
-# Main UI
-# -----------------------------
+if st.sidebar.button("Reset cached Spotify data"):
+    st.session_state.pop("spotify_data", None)
+    st.sidebar.info("Cache cleared.")
+
+sp = ensure_spotify_client()
+
 if st.button("🔎 Analyze my Spotify"):
     with st.spinner("Fetching your Spotify data and analysing it..."):
         data    = fetch_user_data(sp)
         signals = compute_signals(sp, data)
 
-        # Try AI model first
         model = ensure_ai_model()
         if model is not None:
             X = build_feature_vector(signals).reshape(1, -1)
             preds = np.clip(model.predict(X).reshape(-1), 0.0, 1.0)
             traits = {k: float(v) for k, v in zip(TARGET_COLUMNS, preds)}
-            # add the extra dimensions so your radar shows more spread
             traits["Energy"]     = normalize(signals.get("avg_energy", 0.5), 0.3, 0.9)
             traits["Positivity"] = normalize(signals.get("avg_valence", 0.5), 0.2, 0.8)
             mode_used = "AI model (Ridge)"
@@ -453,22 +395,24 @@ if st.button("🔎 Analyze my Spotify"):
         mbti = classify_mbti(traits["Openness"], traits["Extraversion"], traits["Agreeableness"], traits["Conscientiousness"])
 
     st.caption(f"Mode: {mode_used}")
-    st.subheader("🎭 Personality scores")
     cols = st.columns(len(traits))
     for i, (k, v) in enumerate(traits.items()):
         with cols[i]:
             st.metric(k, f"{v:.2f}")
 
-    # Radar chart
     labels = list(traits.keys())
     values = list(traits.values())
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
-    values += values[:1]; angles += angles[:1]
+    values += values[:1]
+    angles += angles[:1]
     fig, ax = plt.subplots(figsize=(4,4), subplot_kw=dict(polar=True))
     ax.fill(angles, values, alpha=0.25)
     ax.plot(angles, values, linewidth=2)
-    ax.set_xticks(angles[:-1]); ax.set_xticklabels(labels)
-    ax.set_yticks([0.2,0.4,0.6,0.8]); ax.set_title("Personality radar", pad=20)
+    ax.set_ylim(0, 1)
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels)
+    ax.set_yticks([0.2,0.4,0.6,0.8])
+    ax.set_title("Personality radar", pad=20)
     st.pyplot(fig)
 
     st.markdown(
@@ -481,4 +425,3 @@ if st.button("🔎 Analyze my Spotify"):
 
     with st.expander("🔍 Raw signals"):
         st.json({k: round(float(v),3) for k, v in signals.items()})
-
