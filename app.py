@@ -107,12 +107,17 @@ def clean_track(t):
     }
 
 def clean_artist(a):
+    followers = a.get("followers", 0)
+    if isinstance(followers, dict):
+        followers = followers.get("total", 0)
+
     return {
         "name": a.get("name"),
         "genres": a.get("genres", []),
         "popularity": a.get("popularity"),
-        "followers": a.get("followers", {}).get("total", 0)
+        "followers": followers
     }
+
 
 
 # -----------------------------
