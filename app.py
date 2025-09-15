@@ -16,7 +16,7 @@ except Exception:
     pass
 
 # =======================
-# CONFIG & PAGE
+# CONFIG
 # =======================
 SCOPES = (
     "user-top-read "
@@ -25,7 +25,6 @@ SCOPES = (
     "user-follow-read "
     "user-read-recently-played"
 )
-
 CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")
@@ -67,8 +66,10 @@ def _exchange_code(auth_manager: SpotifyOAuth, code: str) -> Dict[str, Any]:
 def ensure_spotify_client() -> spotipy.Spotify:
     auth_manager = get_auth_manager()
     token_info = st.session_state.get("token_info")
+
     if token_info and not auth_manager.is_token_expired(token_info):
         return spotipy.Spotify(auth=token_info["access_token"])
+
     if token_info and auth_manager.is_token_expired(token_info):
         try:
             st.session_state["token_info"] = auth_manager.refresh_access_token(token_info["refresh_token"])
@@ -101,7 +102,7 @@ def batch(iterable: List[Any], n: int = 50) -> Iterator[List[Any]]:
     for i in range(0, len(iterable), n):
         yield iterable[i : i + n]
 
-# Simple in-memory caches for Last.fm
+# In-memory Last.fm caches (avoid API hammering)
 _lastfm_artist_cache: Dict[str, Dict[str, Any]] = {}
 _lastfm_track_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
@@ -123,7 +124,7 @@ def get_lastfm_artist(name: str) -> Dict[str, Any]:
     except Exception:
         data = {}
     _lastfm_artist_cache[key] = data
-    time.sleep(0.07)  # polite delay
+    time.sleep(0.06)  # polite delay
     return data
 
 def get_lastfm_track(artist: str, track: str) -> Dict[str, Any]:
@@ -139,30 +140,32 @@ def get_lastfm_track(artist: str, track: str) -> Dict[str, Any]:
     except Exception:
         data = {}
     _lastfm_track_cache[key] = data
-    time.sleep(0.07)
+    time.sleep(0.06)
     return data
 
 # =======================
 # GENRE/TAG NORMALISATION
 # =======================
 GENRE_BUCKETS = {
+    # Rentfrow & Gosling macro-dimensions mapped to modern tags/genres
     "reflective_complex": {
-        "classical","baroque","romantic era","chamber","symphony","opera",
-        "jazz","bebop","cool jazz","post-bop","fusion jazz","ambient","post-rock",
-        "neo classical","neo-classical","instrumental","piano","orchestral","choral"
+        "classical","baroque","romantic era","chamber","symphony","opera","orchestral","choral",
+        "jazz","bebop","cool jazz","post-bop","swing","latin jazz","fusion jazz","ambient",
+        "post rock","post-rock","neo classical","neo-classical","instrumental","piano"
     },
     "intense_rebellious": {
         "metal","heavy metal","black metal","death metal","thrash","hardcore","punk",
-        "emo","screamo","grindcore","industrial"
+        "emo","screamo","grindcore","industrial","alt metal"
     },
     "upbeat_conventional": {
-        "country","adult contemporary","soft rock","oldies","singer songwriter",
-        "singer-songwriter","easy listening","acoustic pop"
+        "country","adult contemporary","soft rock","oldies","singer songwriter","singer-songwriter",
+        "easy listening","acoustic pop"
     },
     "energetic_rhythmic": {
-        "edm","electronic","dance","house","techno","trance","drum and bass",
-        "drum & bass","dnb","dubstep","garage","electro"
+        "edm","electronic","dance","house","techno","trance","drum and bass","drum & bass","dnb",
+        "dubstep","garage","electro","bassline"
     },
+    # Practical buckets
     "hip_hop": {"hip hop","rap","trap","grime"},
     "rnb_soul": {"r&b","rnb","soul","neo-soul","neo soul"},
     "pop": {"pop","k pop","k-pop","j pop","j-pop","europop","indie pop","synthpop","dance pop"},
@@ -186,7 +189,7 @@ def map_tokens_to_buckets(tokens: List[str]) -> Counter:
     return counts
 
 # =======================
-# SPOTIFY DATA PULLS (NO streamlit cache here -> avoids UnhashableParamError)
+# SPOTIFY DATA PULLS (no caching on sp to avoid UnhashableParamError)
 # =======================
 def fetch_user_profile(sp: spotipy.Spotify) -> Dict[str, Any]:
     try:
@@ -277,16 +280,18 @@ def fetch_recent(sp: spotipy.Spotify) -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-# Utilities to collect IDs
+# =======================
+# ID COLLECTION (only true tracks — avoid podcasts/episodes)
+# =======================
 def collect_unique_track_ids(data: Dict[str, Any]) -> List[str]:
-    track_ids = []
+    ids = []
     for v in data["top_tracks"].values():
-        track_ids.extend([t.get("id") for t in v if t and t.get("id")])
-    track_ids.extend([t.get("id") for t in data["saved_tracks"] if t and t.get("id")])
+        ids.extend([t.get("id") for t in v if t and t.get("id") and t.get("type") == "track"])
+    ids.extend([t.get("id") for t in data["saved_tracks"] if t and t.get("id") and t.get("type") == "track"])
     for tracks in data["playlist_tracks"].values():
-        track_ids.extend([t.get("id") for t in tracks if t and t.get("id")])
-    track_ids.extend([it.get("track", {}).get("id") for it in data["recent"] if it.get("track")])
-    return list({tid for tid in track_ids if isinstance(tid, str) and tid})
+        ids.extend([t.get("id") for t in tracks if t and t.get("id") and t.get("type") == "track"])
+    ids.extend([it.get("track", {}).get("id") for it in data["recent"] if it.get("track") and it["track"].get("type") == "track"])
+    return list({tid for tid in ids if isinstance(tid, str) and tid})
 
 def collect_unique_artist_ids(data: Dict[str, Any]) -> List[str]:
     a_ids = []
@@ -304,46 +309,50 @@ def collect_unique_artist_ids(data: Dict[str, Any]) -> List[str]:
             if a.get("id"): a_ids.append(a["id"])
     return list({aid for aid in a_ids if isinstance(aid, str) and aid})
 
-# Robust features fetch
-def fetch_track_details_and_features(sp: spotipy.Spotify, track_ids: List[str], use_audio_features: bool) -> Dict[str, Dict[str, Any]]:
+# =======================
+# ENRICHMENT — TRACKS & ARTISTS
+# =======================
+def fetch_track_details_and_features(sp: spotipy.Spotify, track_ids: List[str], include_audio_features: bool = True) -> Dict[str, Dict[str, Any]]:
+    """
+    Robust strategy:
+      1) Fetch track metadata via sp.tracks()
+      2) Keep ONLY items with type=='track' (episodes/podcasts cause 403)
+      3) Fetch audio features in a single batch; if Spotify errors, skip features for that batch (no retries)
+      4) Always continue — never fail the whole run because of a few bad IDs
+    """
     details: Dict[str, Dict[str, Any]] = {}
-    skipped = 0
     total = len(track_ids)
+    ok_feature_tracks = 0
     prog = st.empty()
 
     for i, chunk in enumerate(batch(track_ids, 50), start=1):
-        valid_ids = [tid for tid in chunk if isinstance(tid, str) and tid]
-        prog.text(f"Fetching track metadata/features: batch {i}/{math.ceil(total/50)}")
-        if not valid_ids:
-            continue
-
-        # Track metadata
+        prog.text(f"Fetching track metadata/features: batch {i}/{max(1, math.ceil(total/50))}")
+        # Get metadata
         try:
-            tracks = sp.tracks(valid_ids).get("tracks", [])
+            tlist = sp.tracks(chunk).get("tracks", [])
         except Exception:
-            tracks = [None] * len(valid_ids)
+            tlist = []
 
-        # Audio features (optional & robust)
+        # Keep true tracks only
+        track_map = {t["id"]: t for t in tlist if t and t.get("type") == "track"}
+        valid_ids = list(track_map.keys())
         feats: List[Any] = [None] * len(valid_ids)
-        if use_audio_features and valid_ids:
+
+        if include_audio_features and valid_ids:
             try:
                 tmp = sp.audio_features(valid_ids) or []
+                # length align
                 if len(tmp) != len(valid_ids):
-                    # Ensure length alignment for zipping
                     tmp += [None] * (len(valid_ids) - len(tmp))
                 feats = tmp
+                ok_feature_tracks += sum(1 for f in feats if f)
             except Exception:
-                # Per-track fallback & skip on error
-                for idx, tid in enumerate(valid_ids):
-                    try:
-                        fl = sp.audio_features([tid])
-                        feats[idx] = fl[0] if fl and fl[0] else None
-                    except Exception:
-                        feats[idx] = None
-                        skipped += 1
+                # Silent skip; keep None features for this batch
+                pass
 
-        # Build detail entries
-        for tid, t_info, f_info in zip(valid_ids, tracks, feats):
+        # Compose detail records
+        for tid, f_info in zip(valid_ids, feats):
+            t_info = track_map.get(tid)
             if not t_info:
                 continue
             artists = [a.get("name") for a in t_info.get("artists", []) if a.get("name")]
@@ -353,20 +362,20 @@ def fetch_track_details_and_features(sp: spotipy.Spotify, track_ids: List[str], 
                 "album": t_info.get("album", {}).get("name"),
                 "release_date": t_info.get("album", {}).get("release_date"),
                 "popularity": t_info.get("popularity", 0),
-                "duration_ms": t_info.get("duration_ms"),
             }
-            # Attach features if present
-            if use_audio_features and f_info:
+            if include_audio_features and f_info:
                 for k in ["danceability","energy","valence","acousticness","instrumentalness",
                           "speechiness","liveness","loudness","tempo","key","mode","time_signature"]:
                     meta[k] = f_info.get(k)
-            # Last.fm track enrichment
+
+            # Last.fm track enrichment (safe)
             try:
                 if artists and meta.get("name"):
                     tr = get_lastfm_track(artists[0], meta["name"])
                     tblock = tr.get("track", {})
                     pc = tblock.get("playcount")
-                    if pc is not None: meta["lfm_playcount"] = int(pc)
+                    if pc is not None:
+                        meta["lfm_playcount"] = int(pc)
                     tags = tblock.get("toptags", {}).get("tag", [])
                     if isinstance(tags, list):
                         meta["lfm_tags"] = [t.get("name") for t in tags[:10] if t.get("name")]
@@ -376,8 +385,7 @@ def fetch_track_details_and_features(sp: spotipy.Spotify, track_ids: List[str], 
             details[tid] = meta
 
     prog.empty()
-    if skipped:
-        st.warning(f"Skipped audio features for {skipped} track(s) that Spotify rejected.")
+    st.info(f"Audio features coverage: {ok_feature_tracks} / {total} tracks had features returned.")
     return details
 
 def fetch_artist_details(sp: spotipy.Spotify, artist_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -386,7 +394,7 @@ def fetch_artist_details(sp: spotipy.Spotify, artist_ids: List[str]) -> Dict[str
     prog = st.empty()
 
     for i, chunk in enumerate(batch(artist_ids, 50), start=1):
-        prog.text(f"Fetching artist metadata: batch {i}/{math.ceil(total/50)}")
+        prog.text(f"Fetching artist metadata: batch {i}/{max(1, math.ceil(total/50))}")
         try:
             arts = sp.artists(chunk).get("artists", [])
         except Exception:
@@ -399,15 +407,16 @@ def fetch_artist_details(sp: spotipy.Spotify, artist_ids: List[str]) -> Dict[str
                 "name": a.get("name"),
                 "genres": a.get("genres", []),
                 "popularity": a.get("popularity", 0),
-                "followers": a.get("followers", {}).get("total", 0)
+                "followers": a.get("followers", {}).get("total", 0),
             }
-            # Last.fm artist enrichment
+            # Last.fm enrichment
             try:
                 la = get_lastfm_artist(a.get("name") or "")
                 ablock = la.get("artist", {})
                 stats = ablock.get("stats", {})
                 pc = stats.get("playcount")
-                if pc is not None: meta["lfm_playcount"] = int(pc)
+                if pc is not None:
+                    meta["lfm_playcount"] = int(pc)
                 tags = ablock.get("tags", {}).get("tag", [])
                 if isinstance(tags, list):
                     meta["lfm_tags"] = [t.get("name") for t in tags[:10] if t.get("name")]
@@ -419,7 +428,7 @@ def fetch_artist_details(sp: spotipy.Spotify, artist_ids: List[str]) -> Dict[str
     return details
 
 # =======================
-# PERSONALITY HEURISTICS
+# PERSONALITY HEURISTICS (research-aligned, robust to missing features)
 # =======================
 def safe_mean(vals: List[float]) -> float:
     nums = [v for v in vals if isinstance(v, (int, float))]
@@ -434,7 +443,7 @@ def compute_personality(data: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[st
     tracks = list(data.get("track_details", {}).values())
     artists = list(data.get("artist_details", {}).values())
 
-    # tokens from both Spotify genres & Last.fm tags
+    # Collect tokens (Spotify artist genres + Last.fm artist/track tags)
     tokens: List[str] = []
     for a in artists:
         tokens.extend(a.get("genres", []) or [])
@@ -447,16 +456,15 @@ def compute_personality(data: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[st
     bucket_share = {k: v/total_hits for k, v in bucket_counts.items()}
     genre_diversity = len({norm_token(x) for x in tokens if x}) / (len(tokens) or 1)
 
-    # mainstreamness from track popularity (0..1)
+    # Mainstreamness (avg popularity 0..1)
     pops = [t.get("popularity") for t in tracks if isinstance(t.get("popularity"), (int, float))]
     mainstreamness = (sum(pops)/len(pops)/100.0) if pops else 0.0
 
-    # Audio coverage
+    # Audio features (may be sparse)
     feature_fields = ["danceability","energy","valence","acousticness","instrumentalness","speechiness","liveness","loudness","tempo"]
     coverage = {f: sum(1 for t in tracks if isinstance(t.get(f), (int, float))) for f in feature_fields}
     have_features = sum(coverage.values()) > 0
 
-    # Aggregate features if present
     avg = {}
     loud_norm = tempo_norm = 0.0
     if have_features:
@@ -465,54 +473,57 @@ def compute_personality(data: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[st
         loud_norm = normalize01(avg.get("loudness"), -60.0, 0.0)
         tempo_norm = normalize01(avg.get("tempo"), 0.0, 200.0)
 
-    # Heuristics (research-aligned).
-    # We blend genres + features; if features missing, genre-only still works.
+    # Heuristics (blend genres + features, still meaningful if features missing)
+    # Extraversion: energetic/rhythmic & pop, + danceability/valence when present
     extraversion = (
-        (avg.get("danceability", 0) * 0.45 if have_features else 0) +
+        (avg.get("danceability", 0) * 0.40 if have_features else 0) +
         (avg.get("valence", 0) * 0.25 if have_features else 0) +
-        (bucket_share.get("energetic_rhythmic",0) + bucket_share.get("pop",0)) * 0.30
+        (bucket_share.get("energetic_rhythmic", 0) + bucket_share.get("pop", 0)) * 0.35
     )
 
+    # Conscientiousness: structured/mainstream, lower intensity & tempo, fewer intense/rebellious
     conscientiousness = (
-        ((1 - avg.get("energy", 0)) * 0.30 if have_features else 0) +
+        ((1 - avg.get("energy", 0)) * 0.25 if have_features else 0) +
         ((1 - tempo_norm) * 0.15 if have_features else 0) +
-        (1 - bucket_share.get("intense_rebellious",0)) * 0.30 +
+        (1 - bucket_share.get("intense_rebellious", 0)) * 0.35 +
         mainstreamness * 0.25
     )
 
+    # Agreeableness: mellow/acoustic, lower energy & speechiness, folk/upbeat-conventional
     agreeableness = (
         ((avg.get("acousticness", 0)) * 0.30 if have_features else 0) +
         ((1 - avg.get("energy", 0)) * 0.15 if have_features else 0) +
         (1 - (avg.get("speechiness", 0) if have_features else 0)) * 0.10 +
-        (bucket_share.get("folk_acoustic",0) + bucket_share.get("upbeat_conventional",0)) * 0.45
+        (bucket_share.get("folk_acoustic", 0) + bucket_share.get("upbeat_conventional", 0)) * 0.45
     )
 
+    # Openness: diversity + reflective/complex, acoustic/instrumental, quieter/less energetic
     openness = (
         genre_diversity * 0.35 +
         ((avg.get("acousticness", 0) + avg.get("instrumentalness", 0)) * 0.20 if have_features else 0) +
         ((1 - loud_norm) * 0.10 if have_features else 0) +
         ((1 - avg.get("energy", 0)) * 0.05 if have_features else 0) +
-        bucket_share.get("reflective_complex",0) * 0.30
+        bucket_share.get("reflective_complex", 0) * 0.30
     )
 
+    # Neuroticism: intense/rebellious + low valence/danceability; some energy
     neuroticism = (
-        ((1 - avg.get("danceability", 0)) * 0.35 if have_features else 0.15) +
-        ((1 - avg.get("valence", 0)) * 0.35 if have_features else 0.15) +
+        ((1 - avg.get("danceability", 0)) * 0.30 if have_features else 0.15) +
+        ((1 - avg.get("valence", 0)) * 0.30 if have_features else 0.15) +
         ((avg.get("energy", 0)) * 0.15 if have_features else 0) +
-        bucket_share.get("intense_rebellious",0) * 0.35
+        bucket_share.get("intense_rebellious", 0) * 0.40
     )
 
     scores = {
-        "Extraversion": max(0.0, min(1.0, extraversion)),
-        "Conscientiousness": max(0.0, min(1.0, conscientiousness)),
-        "Agreeableness": max(0.0, min(1.0, agreeableness)),
         "Openness": max(0.0, min(1.0, openness)),
+        "Conscientiousness": max(0.0, min(1.0, conscientiousness)),
+        "Extraversion": max(0.0, min(1.0, extraversion)),
+        "Agreeableness": max(0.0, min(1.0, agreeableness)),
         "Neuroticism": max(0.0, min(1.0, neuroticism)),
     }
-
     debug = {
-        "genre_bucket_counts": dict(bucket_counts),
-        "genre_bucket_share": bucket_share,
+        "bucket_counts": dict(bucket_counts),
+        "bucket_share": bucket_share,
         "genre_diversity": genre_diversity,
         "mainstreamness": mainstreamness,
         "feature_coverage": coverage,
@@ -527,11 +538,11 @@ def main():
     sp = ensure_spotify_client()
 
     st.sidebar.header("Options")
-    use_lastfm = st.sidebar.checkbox("Include Last.fm enrichment", value=True)
-    use_features = st.sidebar.checkbox("Include Spotify audio features", value=True)
-    st.sidebar.caption("If features cause issues or slowdowns, toggle them off. The model still works on genres/tags.")
+    include_features = st.sidebar.checkbox("Include Spotify audio features", value=True)
+    include_lastfm = st.sidebar.checkbox("Include Last.fm enrichment", value=True)
+    st.sidebar.caption("If features slow it down, disable them — personality still works from genres/tags.")
 
-    if st.button("🔎 Pull data + infer personality"):
+    if st.button("🔎 Pull everything + infer personality"):
         with st.spinner("Fetching Spotify profile…"):
             user = fetch_user_profile(sp)
         st.success(f"Hello, {user.get('display_name') or 'Spotify user'}! 👋")
@@ -553,34 +564,29 @@ def main():
             "recent": recent,
         }
 
-        # IDs
         t_ids = collect_unique_track_ids(data)
         a_ids = collect_unique_artist_ids(data)
-
         st.info(f"Unique tracks: {len(t_ids)} | Unique artists: {len(a_ids)}")
 
-        # Enrich tracks
         with st.spinner("Enriching tracks (features + Last.fm)…"):
-            track_details = fetch_track_details_and_features(sp, t_ids, use_features)
-            if not use_lastfm:
-                # Strip Last.fm additions if disabled
+            track_details = fetch_track_details_and_features(sp, t_ids, include_audio_features=include_features)
+            if not include_lastfm:
                 for v in track_details.values():
-                    v.pop("lfm_tags", None)
                     v.pop("lfm_playcount", None)
+                    v.pop("lfm_tags", None)
         data["track_details"] = track_details
 
-        # Enrich artists
         with st.spinner("Enriching artists (Spotify + Last.fm)…"):
             artist_details = fetch_artist_details(sp, a_ids)
-            if not use_lastfm:
+            if not include_lastfm:
                 for v in artist_details.values():
-                    v.pop("lfm_tags", None)
                     v.pop("lfm_playcount", None)
+                    v.pop("lfm_tags", None)
         data["artist_details"] = artist_details
 
         # Samples
-        st.subheader("🎼 Enriched Tracks (first 10)")
-        for t in list(track_details.values())[:10]:
+        st.subheader("🎼 Enriched Tracks (first 12)")
+        for t in list(track_details.values())[:12]:
             tags = ", ".join(t.get("lfm_tags", []) or []) or "—"
             st.write(
                 f"- {t.get('name')} — {', '.join(t.get('artists', []) or [])} "
@@ -588,8 +594,8 @@ def main():
                 f"Energy: {t.get('energy')}, Valence: {t.get('valence')}, Tempo: {t.get('tempo')}) | Tags: {tags}"
             )
 
-        st.subheader("🎤 Enriched Artists (first 10)")
-        for a in list(artist_details.values())[:10]:
+        st.subheader("🎤 Enriched Artists (first 12)")
+        for a in list(artist_details.values())[:12]:
             genres = ", ".join(a.get("genres", []) or []) or "—"
             tags = ", ".join(a.get("lfm_tags", []) or []) or "—"
             st.write(
@@ -597,7 +603,6 @@ def main():
                 f"| Followers: {a.get('followers')} | LFM plays: {a.get('lfm_playcount','—')} | Tags: {tags}"
             )
 
-        # Personality
         with st.spinner("Inferring personality (Big Five)…"):
             scores, debug = compute_personality(data)
 
@@ -610,7 +615,7 @@ def main():
         with st.expander("🔎 Signals / Debug"):
             st.json(debug)
 
-        with st.expander("📦 Counts"):
+        with st.expander("📦 Dataset counts"):
             st.json({
                 "saved_tracks": len(saved_tracks),
                 "playlists": len(playlists),
