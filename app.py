@@ -141,17 +141,27 @@ def fetch_full_user_data(sp):
             if a.get("id"): artist_ids.add(a["id"])
 
     # --- Enrich tracks ---
+    
     track_details = {}
     for b in batch(list(track_ids), 50):
-        feats = sp.audio_features(b)
-        tracks = sp.tracks(b)["tracks"]
+        try:
+            feats = sp.audio_features(b)
+        except Exception:
+            feats = [None] * len(b)  # if request fails, pad with None
+
+        try:
+            tracks = sp.tracks(b)["tracks"]
+        except Exception:
+            tracks = [None] * len(b)
+
         for t, f in zip(tracks, feats):
-            if not t: continue
+            if not t:
+                continue
             track_details[t["id"]] = {
-                "name": t["name"],
-                "artists": [a["name"] for a in t["artists"]],
-                "album": t["album"]["name"] if t.get("album") else None,
-                "release_date": t["album"].get("release_date") if t.get("album") else None,
+                "name": t.get("name"),
+                "artists": [a["name"] for a in t.get("artists", [])],
+                "album": t.get("album", {}).get("name"),
+                "release_date": t.get("album", {}).get("release_date"),
                 "popularity": t.get("popularity", 0),
                 "duration_ms": t.get("duration_ms"),
                 "energy": f.get("energy") if f else None,
@@ -160,6 +170,7 @@ def fetch_full_user_data(sp):
                 "tempo": f.get("tempo") if f else None,
             }
     data["track_details"] = track_details
+
 
     # --- Enrich artists ---
     artist_details = {}
