@@ -5,28 +5,52 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import requests
 
+# Load environment variables if .env is present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 # -----------------------------
 # Config
 # -----------------------------
-SCOPES = "user-top-read playlist-read-private user-library-read"
+SCOPES = "user-top-read playlist-read-private user-library-read user-follow-read"
 
 CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")
-LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY")  # <-- make sure this is in secrets.toml
+LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY")
 
-st.set_page_config(page_title="Spotify + Last.fm Enrichment", page_icon="🎧", layout="centered")
+st.set_page_config(page_title="Spotify + Last.fm Data Viewer", page_icon="🎧", layout="centered")
 st.title("🎧 Spotify + Last.fm Data Viewer")
 
 if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
     st.error("Missing Spotify credentials. Please set SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET and SPOTIPY_REDIRECT_URI.")
     st.stop()
 if not LASTFM_API_KEY:
-    st.warning("⚠️ Missing Last.fm API key. Add LASTFM_API_KEY to your secrets if you want enrichment.")
+    st.warning("⚠️ No Last.fm API key found. Set LASTFM_API_KEY to enrich with tags & playcounts.")
 
 # -----------------------------
-# Auth helpers
+# Helpers
 # -----------------------------
+def batch(iterable, n=50):
+    for i in range(0, len(iterable), n):
+        yield iterable[i:i+n]
+
+def lastfm_request(method: str, **params):
+    """Generic Last.fm API request helper."""
+    base_url = "http://ws.audioscrobbler.com/2.0/"
+    query = {
+        "api_key": LASTFM_API_KEY,
+        "format": "json",
+        "method": method,
+        **params
+    }
+    r = requests.get(base_url, params=query, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
 def get_auth_manager():
     return SpotifyOAuth(
         client_id=CLIENT_ID,
@@ -37,6 +61,15 @@ def get_auth_manager():
         open_browser=False,
         show_dialog=True
     )
+
+def _exchange_code(auth_manager, code):
+    try:
+        return auth_manager.get_access_token(code, as_dict=True)
+    except TypeError:
+        token = auth_manager.get_access_token(code)
+        if isinstance(token, dict):
+            return token
+        return {"access_token": token, "expires_at": None, "refresh_token": None, "scope": SCOPES}
 
 def ensure_spotify_client() -> spotipy.Spotify:
     auth_manager = get_auth_manager()
@@ -56,7 +89,7 @@ def ensure_spotify_client() -> spotipy.Spotify:
     if "code" in params:
         code = params["code"][0] if isinstance(params["code"], list) else params["code"]
         try:
-            token_info = auth_manager.get_access_token(code)
+            token_info = _exchange_code(auth_manager, code)
             st.session_state["token_info"] = token_info
             st.experimental_set_query_params()
             st.rerun()
@@ -71,114 +104,137 @@ def ensure_spotify_client() -> spotipy.Spotify:
     st.stop()
 
 # -----------------------------
-# Last.fm
+# Data Fetch + Enrichment
 # -----------------------------
-def lastfm_request(method: str, **params):
-    """Generic Last.fm API request helper."""
-    if not LASTFM_API_KEY:
-        return {}
-    base_url = "http://ws.audioscrobbler.com/2.0/"
-    query = {
-        "api_key": LASTFM_API_KEY,
-        "format": "json",
-        "method": method,
-        **params
-    }
-    r = requests.get(base_url, params=query, timeout=10)
-    r.raise_for_status()
-    return r.json()
+def fetch_full_user_data(sp):
+    data = {}
+    time_ranges = ["short_term", "medium_term", "long_term"]
 
-def enrich_with_lastfm(artist_name: str) -> dict:
-    """Fetch Last.fm info for an artist name."""
-    if not LASTFM_API_KEY:
-        return {}
-    try:
-        res = lastfm_request("artist.getInfo", artist=artist_name)
-        if "artist" in res:
-            last_artist = res["artist"]
-            playcount = int(last_artist.get("stats", {}).get("playcount", 0))
-            tags = [t["name"] for t in last_artist.get("tags", {}).get("tag", [])]
-            return {
-                "lfm_playcount": playcount,
-                "lfm_tags": tags[:5]
-            }
-    except Exception as e:
-        return {"lfm_error": str(e)}
-    return {}
+    # --- Top tracks & artists ---
+    data["top_tracks"] = {tr: sp.current_user_top_tracks(limit=30, time_range=tr)["items"] for tr in time_ranges}
+    data["top_artists"] = {tr: sp.current_user_top_artists(limit=30, time_range=tr)["items"] for tr in time_ranges}
 
-# -----------------------------
-# Data Fetch
-# -----------------------------
-def fetch_enriched_data(sp):
-    # Top tracks & top artists
-    top_tracks = sp.current_user_top_tracks(limit=20, time_range="medium_term")["items"]
-    top_artists = sp.current_user_top_artists(limit=20, time_range="medium_term")["items"]
+    # --- Saved tracks (up to 200) ---
+    saved = []
+    results = sp.current_user_saved_tracks(limit=50)
+    saved.extend([it["track"] for it in results.get("items", [])])
+    while results.get("next") and len(saved) < 200:
+        results = sp.next(results)
+        saved.extend([it["track"] for it in results.get("items", [])])
+    data["saved_tracks"] = saved
 
-    # Collect unique artist IDs
-    artist_ids = {a["id"] for a in top_artists if a.get("id")}
-    for t in top_tracks:
+    # --- Playlists ---
+    data["playlists"] = sp.current_user_playlists(limit=20)["items"]
+
+    # --- Collect IDs ---
+    track_ids, artist_ids = set(), set()
+    for tr in time_ranges:
+        for t in data["top_tracks"][tr]:
+            if t.get("id"): track_ids.add(t["id"])
+            for a in t.get("artists", []):
+                if a.get("id"): artist_ids.add(a["id"])
+        for a in data["top_artists"][tr]:
+            if a.get("id"): artist_ids.add(a["id"])
+    for t in saved:
+        if t.get("id"): track_ids.add(t["id"])
         for a in t.get("artists", []):
-            if a.get("id"):
-                artist_ids.add(a["id"])
-    artist_ids = list(artist_ids)
+            if a.get("id"): artist_ids.add(a["id"])
 
-    # Get details from Spotify
+    # --- Enrich tracks ---
+    track_details = {}
+    for b in batch(list(track_ids), 50):
+        feats = sp.audio_features(b)
+        tracks = sp.tracks(b)["tracks"]
+        for t, f in zip(tracks, feats):
+            if not t: continue
+            track_details[t["id"]] = {
+                "name": t["name"],
+                "artists": [a["name"] for a in t["artists"]],
+                "album": t["album"]["name"] if t.get("album") else None,
+                "release_date": t["album"].get("release_date") if t.get("album") else None,
+                "popularity": t.get("popularity", 0),
+                "duration_ms": t.get("duration_ms"),
+                "energy": f.get("energy") if f else None,
+                "valence": f.get("valence") if f else None,
+                "danceability": f.get("danceability") if f else None,
+                "tempo": f.get("tempo") if f else None,
+            }
+    data["track_details"] = track_details
+
+    # --- Enrich artists ---
     artist_details = {}
-    for i in range(0, len(artist_ids), 50):
-        batch = artist_ids[i:i+50]
-        try:
-            results = sp.artists(batch)["artists"]
-            for a in results:
-                artist_info = {
-                    "name": a.get("name"),
-                    "genres": a.get("genres", []),
-                    "popularity": a.get("popularity", 0),
-                    "followers": a.get("followers", {}).get("total", 0)
-                }
-                # Add Last.fm enrichment
-                lfm_info = enrich_with_lastfm(a.get("name"))
-                artist_info.update(lfm_info)
-                artist_details[a["id"]] = artist_info
-        except Exception:
-            continue
+    for b in batch(list(artist_ids), 50):
+        res = sp.artists(b)["artists"]
+        for a in res:
+            artist_info = {
+                "name": a.get("name"),
+                "genres": a.get("genres", []),
+                "popularity": a.get("popularity", 0),
+                "followers": a.get("followers", {}).get("total", 0)
+            }
+            # Last.fm enrichment
+            if LASTFM_API_KEY:
+                try:
+                    res = lastfm_request("artist.getInfo", artist=a.get("name"))
+                    if "artist" in res:
+                        lfm = res["artist"]
+                        artist_info["lfm_playcount"] = int(lfm.get("stats", {}).get("playcount", 0))
+                        tags = [t["name"] for t in lfm.get("tags", {}).get("tag", [])]
+                        artist_info["lfm_tags"] = tags[:5]
+                except Exception:
+                    pass
+            artist_details[a["id"]] = artist_info
+    data["artist_details"] = artist_details
 
-    return top_tracks, top_artists, artist_details
-
-# -----------------------------
-# Display Helpers
-# -----------------------------
-def clean_track(t):
-    return {
-        "name": t.get("name"),
-        "artists": [a["name"] for a in t.get("artists", [])],
-        "album": t.get("album", {}).get("name"),
-        "release_date": t.get("album", {}).get("release_date")
-    }
+    return data
 
 # -----------------------------
-# Main
+# Main UI
 # -----------------------------
 sp = ensure_spotify_client()
 
-if st.button("🔎 Pull my Spotify data"):
+if st.button("🔎 Pull my Spotify + Last.fm data"):
     with st.spinner("Fetching your Spotify + Last.fm data..."):
-        top_tracks, top_artists, artist_details = fetch_enriched_data(sp)
+        data = fetch_full_user_data(sp)
 
-    # Top tracks
-    st.subheader("🎵 Top Tracks")
-    for t in top_tracks[:10]:
-        track_info = clean_track(t)
-        st.write(f"- {track_info['name']} — {', '.join(track_info['artists'])} "
-                 f"(Album: {track_info['album']}, Release: {track_info['release_date']})")
+    # --- Show Top Tracks ---
+    st.subheader("🎵 Top Tracks by Range")
+    for tr, tracks in data["top_tracks"].items():
+        st.write(f"**{tr}**")
+        for t in tracks[:5]:
+            st.write("-", t["name"], "—", ", ".join(a["name"] for a in t["artists"]))
 
-    # Enriched artists
-    st.subheader("🎤 Enriched Artists")
-    for a in list(artist_details.values())[:10]:
-        genres = ", ".join(a["genres"]) if a["genres"] else "N/A"
-        tags = ", ".join(a.get("lfm_tags", [])) if a.get("lfm_tags") else "N/A"
-        st.write(f"- {a['name']} "
-                 f"(Genres: {genres} | Popularity: {a['popularity']} | Followers: {a['followers']} | "
-                 f"Last.fm playcount: {a.get('lfm_playcount','?')} | Tags: {tags})")
+    # --- Show Top Artists ---
+    st.subheader("🎤 Top Artists by Range")
+    for tr, arts in data["top_artists"].items():
+        st.write(f"**{tr}**")
+        for a in arts[:5]:
+            st.write("-", a["name"], "Genres:", ", ".join(a["genres"]))
 
+    # --- Show Saved Tracks ---
+    st.subheader("💾 Saved Tracks (sample)")
+    for t in data["saved_tracks"][:10]:
+        st.write("-", t["name"], "—", ", ".join(a["name"] for a in t["artists"]))
+
+    # --- Show Playlists ---
+    st.subheader("📑 Playlists")
+    for p in data["playlists"]:
+        st.write("-", p["name"], f"({p['tracks']['total']} tracks)")
+
+    # --- Enriched Tracks ---
+    st.subheader("🎼 Enriched Tracks (sample)")
+    for tid, t in list(data["track_details"].items())[:10]:
+        st.write(f"- {t['name']} — {', '.join(t['artists'])} "
+                 f"(Energy: {t['energy']}, Valence: {t['valence']}, Danceability: {t['danceability']}, Tempo: {t['tempo']})")
+
+    # --- Enriched Artists ---
+    st.subheader("👩‍🎤 Enriched Artists (sample)")
+    for aid, a in list(data["artist_details"].items())[:10]:
+        tags = ", ".join(a.get("lfm_tags", [])) if "lfm_tags" in a else "N/A"
+        st.write(f"- {a['name']} | Genres: {', '.join(a['genres'])} "
+                 f"| Followers: {a['followers']} | Tags: {tags} "
+                 f"| Last.fm playcount: {a.get('lfm_playcount', 'N/A')}")
+
+    # --- Raw data ---
     with st.expander("📦 Raw JSON"):
-        st.json(artist_details)
+        st.json(data)
