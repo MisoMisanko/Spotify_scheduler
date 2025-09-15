@@ -691,10 +691,14 @@ def main() -> None:
         "Include Spotify audio features (requires extended access)", value=False
     )
     include_lastfm = st.sidebar.checkbox("Include Last.fm enrichment", value=True)
+    # Explanatory caption about disabled audio features.  Triple quotes allow
+    # the string to span multiple lines without syntax errors.  Note that we
+    # avoid using single quotes inside the string to prevent premature
+    # termination.
     st.sidebar.caption(
-        "Audio features have been disabled by default because Spotify's audio‑feature
-        endpoint was deprecated for new apps in Nov 2024.  Last.fm enrichment
-        provides genre tags and playcounts."
+        """Audio features have been disabled by default because Spotify’s audio‑feature
+        endpoint was deprecated for new apps in Nov 2024. Last.fm enrichment
+        provides genre tags and playcounts."""
     )
     if st.button("🔎 Pull data and infer personality"):
         with st.spinner("Fetching your Spotify profile…"):
