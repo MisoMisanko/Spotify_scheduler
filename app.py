@@ -390,11 +390,24 @@ def fetch_full_user_data(sp: spotipy.Spotify) -> Dict[str, Any]:
             tracks = sp.tracks(valid_ids).get("tracks", [])
         except Exception:
             tracks = []
-        # Fetch audio features for valid IDs
+        # Fetch audio features for valid IDs.  Spotify may return a 403 if one
+        # ID in the list is invalid or unavailable.  We attempt the batch
+        # request first; if it fails we fall back to fetching features
+        # individually per track to isolate problematic IDs.
         try:
             feats = sp.audio_features(valid_ids) or []
         except Exception:
-            feats = [None] * len(valid_ids)
+            feats = []
+            for tid in valid_ids:
+                try:
+                    # audio_features returns a list; extract first element
+                    f_list = sp.audio_features([tid])
+                    if f_list and f_list[0] is not None:
+                        feats.append(f_list[0])
+                    else:
+                        feats.append(None)
+                except Exception:
+                    feats.append(None)
         for tid, t_info, f_info in zip(valid_ids, tracks, feats):
             if not t_info:
                 continue
