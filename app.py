@@ -1,4 +1,4 @@
-# app.py - Complete Spotify Personality Predictor using TRAINED MODELS
+# app.py - DEBUG VERSION to identify why all users get same results
 import os
 import time
 import streamlit as st
@@ -31,8 +31,8 @@ LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY")
 LASTFM_SHARED_SECRET = os.environ.get("LASTFM_SHARED_SECRET")
 
 st.set_page_config(
-    page_title="Spotify Personality Predictor",
-    page_icon="🎵",
+    page_title="Spotify Personality Predictor - DEBUG",
+    page_icon="🐛",
     layout="wide"
 )
 
@@ -40,14 +40,11 @@ if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
     st.error("Missing Spotify credentials")
     st.stop()
 
-if LASTFM_API_KEY:
-    st.sidebar.success("✅ Last.fm integration enabled")
-else:
-    st.sidebar.info("ℹ️ Last.fm API not configured")
+# DEBUG: Add session state to track user-specific data
+if 'debug_data' not in st.session_state:
+    st.session_state.debug_data = {}
 
-# -----------------------------------------------------------------------------
-# Authentication (same as working code)
-# -----------------------------------------------------------------------------
+# Authentication functions (same as before)
 def get_auth_manager():
     return SpotifyOAuth(
         client_id=CLIENT_ID,
@@ -78,9 +75,6 @@ def ensure_spotify_client():
     st.markdown(f"[Log in with Spotify]({login_url})")
     st.stop()
 
-# -----------------------------------------------------------------------------
-# Model Loading and Management
-# -----------------------------------------------------------------------------
 @st.cache_data
 def load_trained_models():
     """Load pre-trained personality prediction models"""
@@ -104,189 +98,70 @@ def load_trained_models():
         except Exception as e:
             st.sidebar.error(f"❌ Error loading {model_name} model: {e}")
     
-    if not loaded_models:
-        st.sidebar.info("ℹ️ No trained models found - using fallback prediction")
-    
     return loaded_models
 
-def create_model_features_from_spotify_data(music_data):
-    """Create features that match what the trained models expect"""
+def get_user_music_data_debug(sp, limit=50):
+    """DEBUG: Get user's music data with detailed logging"""
     
-    audio_features = music_data['audio_features']
-    genres = music_data['genres']
-    tracks = music_data['tracks']
+    st.write("🐛 DEBUG: Starting music data collection...")
     
-    if not audio_features:
-        return None
-    
-    df = pd.DataFrame(audio_features)
-    
-    # Create features that match the behavioral model training
-    features = {
-        # Basic audio features (matching training data)
-        'energy_preference': df['energy'].mean(),
-        'social_music_score': (df['valence'] + df['danceability']).mean() / 2,
-        'high_energy_preference': (df['energy'] > 0.7).astype(int).mean(),
-        'danceable_preference': df['danceability'].mean(),
-        'loudness_preference': (df['loudness'] + 60) / 60,  # Normalize to 0-1
-        'tempo_preference': df['tempo'].mean() / 200,  # Normalize
-        
-        # Openness features
-        'musical_complexity': (df['acousticness'] + df['instrumentalness']).mean() / 2,
-        'experimental_preference': df['instrumentalness'].mean(),
-        'acoustic_exploration': df['acousticness'].mean(),
-        'instrumental_preference': df['instrumentalness'].mean(),
-        'genre_openness': len(set(genres)) / max(len(genres), 1),
-        'unconventional_preference': 1 - (df['popularity'].mean() / 100),
-        
-        # Conscientiousness features
-        'listening_consistency': 1 - df['valence'].std() if len(df) > 1 else 0.8,
-        'routine_preference': df['popularity'].mean() / 100,
-        'completion_tendency': df['energy'].mean(),  # Proxy for not skipping
-        'organized_listening': (df['popularity'] > 50).mean(),
-        'mainstream_preference': (df['popularity'] > 70).mean(),
-        'predictable_choice': 1 - df['energy'].std() if len(df) > 1 else 0.8,
-        
-        # Agreeableness features
-        'positive_music_preference': df['valence'].mean(),
-        'mellow_preference': 1 - df['energy'].mean(),
-        'harmony_seeking': df['valence'].mean(),
-        'avoid_aggressive': 1 - (df['energy'] * (1 - df['valence'])).mean(),
-        'social_acceptance': (df['valence'] + df['danceability']).mean() / 2,
-        'cooperative_music': df['acousticness'].mean(),
-        
-        # Neuroticism features
-        'emotional_music_seeking': 1 - df['valence'].mean(),
-        'mood_instability': df['valence'].std() if len(df) > 1 else 0.1,
-        'anxiety_music': ((1 - df['valence']) * df['energy']).mean(),
-        'comfort_seeking': df['acousticness'].mean(),
-        'emotional_volatility': df['energy'].std() if len(df) > 1 else 0.1,
-        'stress_response': (1 - df['valence']).mean(),
-        
-        # General features
-        'music_sophistication': (df['acousticness'] + df['instrumentalness']).mean() / 2,
-        'emotional_regulation': df['valence'].mean(),
-        'stimulation_seeking': df['energy'].mean(),
-        'mood_management': df['valence'].mean(),
-        'musical_engagement': df['danceability'].mean(),
-    }
-    
-    # Ensure all values are in [0, 1] range
-    for key, value in features.items():
-        # Handle pandas Series or numpy arrays
-        if hasattr(value, 'item'):  # pandas Series or numpy scalar
-            value = value.item() if hasattr(value, 'item') else float(value)
-        elif hasattr(value, '__len__') and not isinstance(value, str):  # Handle arrays/series
-            value = float(value.mean() if hasattr(value, 'mean') else value[0])
-        
-        if pd.isna(value) or value is None:
-            features[key] = 0.5
-        else:
-            features[key] = max(0.0, min(1.0, float(value)))
-    
-    return features
-
-# -----------------------------------------------------------------------------
-# Last.fm Integration for Data Enrichment
-# -----------------------------------------------------------------------------
-def get_lastfm_artist_info(artist_name):
-    """Get additional artist info from Last.fm using your API key"""
-    if not LASTFM_API_KEY:
-        return None
-    
+    # Get user info to differentiate users
     try:
-        url = "http://ws.audioscrobbler.com/2.0/"
-        params = {
-            'method': 'artist.getInfo',
-            'artist': artist_name,
-            'api_key': LASTFM_API_KEY,
-            'format': 'json'
-        }
-        response = requests.get(url, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if 'artist' in data:
-                artist_info = data['artist']
-                return {
-                    'tags': [tag['name'] for tag in artist_info.get('tags', {}).get('tag', [])],
-                    'listeners': int(artist_info.get('stats', {}).get('listeners', 0)),
-                    'playcount': int(artist_info.get('stats', {}).get('playcount', 0)),
-                    'bio_summary': artist_info.get('bio', {}).get('summary', ''),
-                    'similar_artists': [artist['name'] for artist in artist_info.get('similar', {}).get('artist', [])]
-                }
+        user_info = sp.current_user()
+        user_id = user_info.get('id', 'unknown_user')
+        st.write(f"🐛 DEBUG: User ID: {user_id}")
+        st.session_state.debug_data['user_id'] = user_id
     except Exception as e:
-        print(f"Last.fm API error for {artist_name}: {e}")
-    return None
-
-def enrich_with_musicbrainz(artist_name):
-    """Get genre info from MusicBrainz (free, no API key needed)"""
-    try:
-        # Search for artist
-        search_url = f"https://musicbrainz.org/ws/2/artist/?query={artist_name}&fmt=json&limit=1"
-        headers = {'User-Agent': 'SpotifyPersonalityApp/1.0'}
-        
-        response = requests.get(search_url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            artists = data.get('artists', [])
-            if artists:
-                artist_id = artists[0]['id']
-                
-                # Get detailed artist info
-                detail_url = f"https://musicbrainz.org/ws/2/artist/{artist_id}?inc=tags&fmt=json"
-                detail_response = requests.get(detail_url, headers=headers, timeout=5)
-                
-                if detail_response.status_code == 200:
-                    detail_data = detail_response.json()
-                    tags = detail_data.get('tags', [])
-                    return [tag['name'] for tag in tags if tag.get('count', 0) > 0]
-        
-        time.sleep(1)  # Rate limiting
-    except:
-        pass
-    return []
-
-# -----------------------------------------------------------------------------
-# Robust Music Data Collection with Fallbacks
-# -----------------------------------------------------------------------------
-def get_user_music_data_simplified(sp, limit=50):
-    """Get user's music data focusing on track metadata instead of audio features"""
+        st.write(f"🐛 DEBUG: Could not get user info: {e}")
+        user_id = "unknown_user"
     
     music_data = {
+        'user_id': user_id,
         'tracks': [],
         'artists': [],
         'genres': [],
-        'enriched_data': {}
+        'track_names': [],
+        'artist_names': []
     }
     
     try:
-        st.write("🎵 Fetching your music library...")
+        st.write("🐛 DEBUG: Fetching tracks from different time periods...")
         
         all_tracks = []
         
-        # Get tracks from multiple sources
+        # Get tracks from multiple sources with detailed logging
         for time_range in ['short_term', 'medium_term', 'long_term']:
             try:
                 tracks = sp.current_user_top_tracks(limit=limit, time_range=time_range)
+                track_count = len(tracks['items'])
                 all_tracks.extend(tracks['items'])
-                st.write(f"✅ Got {len(tracks['items'])} tracks from {time_range}")
+                
+                # DEBUG: Show track names for verification
+                track_names = [track['name'] for track in tracks['items'][:3]]
+                st.write(f"🐛 DEBUG: {time_range} - {track_count} tracks. Sample: {track_names}")
+                
             except Exception as e:
-                st.warning(f"Could not get {time_range} tracks: {e}")
+                st.write(f"🐛 DEBUG: Error getting {time_range} tracks: {e}")
         
         # Get recent tracks
         try:
             recent = sp.current_user_recently_played(limit=limit)
             recent_tracks = [item['track'] for item in recent['items']]
+            recent_count = len(recent_tracks)
             all_tracks.extend(recent_tracks)
-            st.write(f"✅ Got {len(recent_tracks)} recent tracks")
+            
+            # DEBUG: Show recent track names
+            recent_names = [track['name'] for track in recent_tracks[:3]]
+            st.write(f"🐛 DEBUG: Recent tracks - {recent_count} tracks. Sample: {recent_names}")
+            
         except Exception as e:
-            st.warning(f"Could not get recent tracks: {e}")
+            st.write(f"🐛 DEBUG: Error getting recent tracks: {e}")
         
         if not all_tracks:
-            st.error("No tracks found. Make sure you have listening history!")
+            st.error("🐛 DEBUG: No tracks found!")
             return None
         
-        # Remove duplicates
+        # Remove duplicates and collect names for verification
         seen_ids = set()
         unique_tracks = []
         for track in all_tracks:
@@ -295,198 +170,178 @@ def get_user_music_data_simplified(sp, limit=50):
                 seen_ids.add(track['id'])
         
         music_data['tracks'] = unique_tracks
-        st.success(f"📊 Found {len(unique_tracks)} unique tracks")
+        music_data['track_names'] = [track['name'] for track in unique_tracks]
+        music_data['artist_names'] = [track['artists'][0]['name'] for track in unique_tracks]
         
-        # Get artist info for genres (this usually works)
-        artists_info = get_artist_info_robust(sp, unique_tracks)
-        music_data['artists'] = artists_info['artists']
-        music_data['genres'] = artists_info['genres']
+        st.write(f"🐛 DEBUG: Found {len(unique_tracks)} unique tracks")
+        st.write(f"🐛 DEBUG: Sample track names: {music_data['track_names'][:5]}")
+        st.write(f"🐛 DEBUG: Sample artists: {music_data['artist_names'][:5]}")
         
-        # Enrich with Last.fm if available
-        if LASTFM_API_KEY:
-            st.write("🌍 Enriching with Last.fm data...")
-            enriched_data = enrich_with_lastfm(unique_tracks)
-            music_data['enriched_data'] = enriched_data
+        # Get artist info for genres
+        artist_ids = list(set([track['artists'][0]['id'] for track in unique_tracks if track['artists']]))
+        st.write(f"🐛 DEBUG: Getting info for {len(artist_ids)} unique artists...")
+        
+        all_artists = []
+        all_genres = []
+        
+        for i in range(0, len(artist_ids), 20):
+            batch_ids = artist_ids[i:i+20]
+            try:
+                artists_response = sp.artists(batch_ids)
+                batch_artists = artists_response['artists']
+                all_artists.extend(batch_artists)
+                
+                for artist in batch_artists:
+                    artist_genres = artist.get('genres', [])
+                    all_genres.extend(artist_genres)
+                
+                time.sleep(0.1)
+                
+            except Exception as e:
+                st.write(f"🐛 DEBUG: Error getting artist batch: {e}")
+        
+        music_data['artists'] = all_artists
+        music_data['genres'] = all_genres
+        
+        st.write(f"🐛 DEBUG: Found {len(all_genres)} genre tags")
+        st.write(f"🐛 DEBUG: Sample genres: {list(set(all_genres))[:10]}")
+        
+        # Store in session state for comparison
+        st.session_state.debug_data['music_data'] = music_data
         
         return music_data
         
     except Exception as e:
-        st.error(f"Error collecting music data: {e}")
+        st.error(f"🐛 DEBUG: Error in music data collection: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
-def enrich_with_lastfm(tracks):
-    """Enrich track data using Last.fm"""
-    enriched_data = {
-        'artist_tags': {},
-        'track_tags': {},
-        'artist_popularity': {},
-        'genres_enriched': []
-    }
+def create_features_from_metadata_debug(music_data):
+    """DEBUG: Create features with detailed logging"""
     
-    # Process a sample of tracks to avoid API limits
-    sample_tracks = tracks[:20]  # Limit to avoid too many API calls
-    
-    for i, track in enumerate(sample_tracks):
-        if i % 5 == 0:
-            st.write(f"   Enriching track {i+1}/{len(sample_tracks)}")
-        
-        artist_name = track['artists'][0]['name']
-        track_name = track['name']
-        
-        # Get artist info
-        if artist_name not in enriched_data['artist_tags']:
-            artist_info = get_lastfm_artist_info(artist_name)
-            if artist_info:
-                enriched_data['artist_tags'][artist_name] = artist_info.get('tags', [])
-                enriched_data['artist_popularity'][artist_name] = artist_info.get('listeners', 0)
-                enriched_data['genres_enriched'].extend(artist_info.get('tags', []))
-        
-        time.sleep(0.2)  # Rate limiting
-    
-    return enriched_data
-
-def create_features_from_metadata(music_data):
-    """Create personality features from track metadata and enriched data"""
+    st.write("🐛 DEBUG: Starting feature extraction...")
     
     tracks = music_data['tracks']
     genres = music_data['genres']
-    enriched_data = music_data.get('enriched_data', {})
+    user_id = music_data.get('user_id', 'unknown')
     
     if not tracks:
+        st.error("🐛 DEBUG: No tracks to analyze!")
         return None
     
-    # Analyze track metadata
-    track_df = pd.DataFrame([{
-        'name': track['name'],
-        'artist': track['artists'][0]['name'],
-        'popularity': track.get('popularity', 50),
-        'explicit': track.get('explicit', False),
-        'duration_ms': track.get('duration_ms', 180000)
-    } for track in tracks])
+    st.write(f"🐛 DEBUG: Processing {len(tracks)} tracks for user {user_id}")
+    
+    # Analyze track metadata with detailed logging
+    track_data = []
+    for track in tracks:
+        track_info = {
+            'name': track['name'],
+            'artist': track['artists'][0]['name'],
+            'popularity': track.get('popularity', 50),
+            'explicit': track.get('explicit', False),
+            'duration_ms': track.get('duration_ms', 180000)
+        }
+        track_data.append(track_info)
+    
+    track_df = pd.DataFrame(track_data)
+    
+    # DEBUG: Show actual values being calculated
+    st.write("🐛 DEBUG: Track statistics:")
+    st.write(f"  - Average popularity: {track_df['popularity'].mean():.2f}")
+    st.write(f"  - Explicit tracks: {track_df['explicit'].sum()}/{len(tracks)}")
+    st.write(f"  - Average duration: {track_df['duration_ms'].mean()/60000:.2f} minutes")
     
     # Get enriched genre/tag data
-    all_genres = genres + enriched_data.get('genres_enriched', [])
-    artist_tags = enriched_data.get('artist_tags', {})
-    artist_popularity = enriched_data.get('artist_popularity', {})
+    all_genres = genres
+    genre_text = ' '.join(all_genres).lower()
     
-    # Create features based on metadata analysis
+    st.write(f"🐛 DEBUG: Genre analysis:")
+    st.write(f"  - Total genre mentions: {len(all_genres)}")
+    st.write(f"  - Unique genres: {len(set(all_genres))}")
+    st.write(f"  - Sample genres: {list(set(all_genres))[:5]}")
+    
+    # Create features with detailed calculation logging
     features = {}
     
     # Basic popularity and mainstream metrics
-    features['popularity'] = track_df['popularity'].mean() / 100
+    popularity_mean = track_df['popularity'].mean() / 100
+    features['popularity'] = popularity_mean
     features['mainstream_preference'] = (track_df['popularity'] > 70).mean()
     features['underground_preference'] = (track_df['popularity'] < 30).mean()
     features['explicit_content_ratio'] = track_df['explicit'].mean()
     
-    # Duration preferences (normalized)
-    avg_duration_min = track_df['duration_ms'].mean() / 60000
-    features['song_length_preference'] = min(1.0, avg_duration_min / 5)  # Normalize to 0-1
-    features['short_song_preference'] = (track_df['duration_ms'] < 180000).mean()  # < 3 min
-    features['long_song_preference'] = (track_df['duration_ms'] > 300000).mean()   # > 5 min
+    st.write(f"🐛 DEBUG: Basic metrics calculated:")
+    st.write(f"  - Popularity: {features['popularity']:.3f}")
+    st.write(f"  - Mainstream: {features['mainstream_preference']:.3f}")
+    st.write(f"  - Underground: {features['underground_preference']:.3f}")
+    st.write(f"  - Explicit ratio: {features['explicit_content_ratio']:.3f}")
     
-    # Genre and style analysis
-    features['genre_diversity'] = len(set(all_genres)) / max(len(all_genres), 1)
+    # Duration preferences
+    avg_duration_min = track_df['duration_ms'].mean() / 60000
+    features['song_length_preference'] = min(1.0, avg_duration_min / 5)
+    features['short_song_preference'] = (track_df['duration_ms'] < 180000).mean()
+    features['long_song_preference'] = (track_df['duration_ms'] > 300000).mean()
+    
+    # Genre diversity
+    genre_diversity = len(set(all_genres)) / max(len(all_genres), 1) if all_genres else 0
+    features['genre_diversity'] = genre_diversity
     features['unique_genres_count'] = len(set(all_genres))
     
-    # Analyze genres for personality indicators
-    genre_text = ' '.join(all_genres).lower()
+    st.write(f"🐛 DEBUG: Genre diversity: {genre_diversity:.3f}")
     
-    # Electronic/Dance music (Extraversion)
+    # Analyze genres for personality indicators with detailed logging
     electronic_terms = ['electronic', 'dance', 'house', 'techno', 'edm', 'club', 'party']
-    features['electronic_preference'] = sum(1 for term in electronic_terms if term in genre_text) / max(len(all_genres), 1)
+    electronic_count = sum(1 for term in electronic_terms if term in genre_text)
+    features['electronic_preference'] = electronic_count / max(len(all_genres), 1)
     
-    # Rock/Metal (Energy/Openness)
     rock_terms = ['rock', 'metal', 'punk', 'alternative', 'grunge', 'indie']
-    features['rock_preference'] = sum(1 for term in rock_terms if term in genre_text) / max(len(all_genres), 1)
+    rock_count = sum(1 for term in rock_terms if term in genre_text)
+    features['rock_preference'] = rock_count / max(len(all_genres), 1)
     
-    # Calm/Acoustic (Agreeableness/Neuroticism-)
     calm_terms = ['acoustic', 'folk', 'ambient', 'chill', 'soft', 'mellow', 'classical']
-    features['calm_preference'] = sum(1 for term in calm_terms if term in genre_text) / max(len(all_genres), 1)
+    calm_count = sum(1 for term in calm_terms if term in genre_text)
+    features['calm_preference'] = calm_count / max(len(all_genres), 1)
     
-    # Hip-hop/Rap (Social/Extraversion)
-    hiphop_terms = ['hip hop', 'rap', 'hip-hop', 'trap', 'drill']
-    features['hiphop_preference'] = sum(1 for term in hiphop_terms if term in genre_text) / max(len(all_genres), 1)
-    
-    # Pop (Mainstream/Agreeableness)
     pop_terms = ['pop', 'mainstream', 'chart', 'radio']
-    features['pop_preference'] = sum(1 for term in pop_terms if term in genre_text) / max(len(all_genres), 1)
+    pop_count = sum(1 for term in pop_terms if term in genre_text)
+    features['pop_preference'] = pop_count / max(len(all_genres), 1)
     
-    # Experimental/Avant-garde (Openness)
-    experimental_terms = ['experimental', 'avant-garde', 'progressive', 'art', 'weird', 'unusual']
-    features['experimental_preference'] = sum(1 for term in experimental_terms if term in genre_text) / max(len(all_genres), 1)
+    st.write(f"🐛 DEBUG: Genre preferences:")
+    st.write(f"  - Electronic: {features['electronic_preference']:.3f} (found {electronic_count} matches)")
+    st.write(f"  - Rock: {features['rock_preference']:.3f} (found {rock_count} matches)")
+    st.write(f"  - Calm: {features['calm_preference']:.3f} (found {calm_count} matches)")
+    st.write(f"  - Pop: {features['pop_preference']:.3f} (found {pop_count} matches)")
     
     # Artist diversity
     unique_artists = len(set([track['artists'][0]['name'] for track in tracks]))
     features['artist_diversity'] = unique_artists / len(tracks)
     
-    # Use Last.fm data if available
-    if artist_popularity:
-        avg_artist_popularity = np.mean(list(artist_popularity.values()))
-        features['artist_mainstream_score'] = min(1.0, avg_artist_popularity / 1000000)  # Normalize
-    else:
-        features['artist_mainstream_score'] = features['popularity']
-    
-    # Create estimated audio-like features from metadata
-    # These are educated guesses based on genre and popularity
+    # Create personality indicators
     features['energy_preference'] = (
         features['electronic_preference'] * 0.4 +
         features['rock_preference'] * 0.4 +
-        features['hiphop_preference'] * 0.2
-    )
-    
-    features['danceability_preference'] = (
-        features['electronic_preference'] * 0.5 +
-        features['pop_preference'] * 0.3 +
-        features['hiphop_preference'] * 0.2
-    )
-    
-    features['valence_preference'] = (
-        features['pop_preference'] * 0.4 +
-        features['electronic_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.3
-    )
-    
-    features['acousticness_preference'] = features['calm_preference']
-    
-    features['musical_sophistication'] = (
-        features['experimental_preference'] * 0.4 +
-        features['genre_diversity'] * 0.3 +
-        features['artist_diversity'] * 0.3
-    )
-    
-    # Personality-relevant behavioral features
-    features['social_music_score'] = (
-        features['pop_preference'] * 0.3 +
-        features['electronic_preference'] * 0.3 +
-        features['mainstream_preference'] * 0.4
+        features['pop_preference'] * 0.2
     )
     
     features['openness_indicators'] = (
-        features['experimental_preference'] * 0.3 +
-        features['genre_diversity'] * 0.3 +
-        features['underground_preference'] * 0.2 +
-        features['artist_diversity'] * 0.2
+        features['genre_diversity'] * 0.4 +
+        features['underground_preference'] * 0.3 +
+        features['artist_diversity'] * 0.3
     )
     
     features['conscientiousness_indicators'] = (
-        features['mainstream_preference'] * 0.4 +
+        features['mainstream_preference'] * 0.5 +
         features['pop_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.3
+        (1 - features['explicit_content_ratio']) * 0.2
     )
     
-    features['agreeableness_indicators'] = (
-        features['pop_preference'] * 0.3 +
-        features['calm_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.4
-    )
+    st.write(f"🐛 DEBUG: Personality indicators:")
+    st.write(f"  - Energy: {features['energy_preference']:.3f}")
+    st.write(f"  - Openness: {features['openness_indicators']:.3f}")
+    st.write(f"  - Conscientiousness: {features['conscientiousness_indicators']:.3f}")
     
-    features['neuroticism_indicators'] = (
-        features['explicit_content_ratio'] * 0.3 +
-        (1 - features['valence_preference']) * 0.4 +
-        features['underground_preference'] * 0.3
-    )
-    
-    # Ensure all values are in [0, 1] range
+    # Ensure all values are in [0, 1] range and handle edge cases
     for key, value in features.items():
         if hasattr(value, 'item'):
             value = value.item()
@@ -494,542 +349,218 @@ def create_features_from_metadata(music_data):
             value = float(value.mean() if hasattr(value, 'mean') else value[0])
         
         if pd.isna(value) or value is None:
+            st.write(f"🐛 DEBUG: {key} was NaN/None, setting to 0.5")
             features[key] = 0.5
         else:
             features[key] = max(0.0, min(1.0, float(value)))
     
+    # Store features for comparison
+    st.session_state.debug_data['features'] = features
+    st.session_state.debug_data['feature_summary'] = {
+        'user_id': user_id,
+        'track_count': len(tracks),
+        'unique_artists': unique_artists,
+        'genre_count': len(all_genres),
+        'unique_genres': len(set(all_genres)),
+        'avg_popularity': track_df['popularity'].mean(),
+        'key_features': {
+            'energy_preference': features['energy_preference'],
+            'openness_indicators': features['openness_indicators'],
+            'mainstream_preference': features['mainstream_preference']
+        }
+    }
+    
+    st.write(f"🐛 DEBUG: Final feature count: {len(features)}")
+    st.write(f"🐛 DEBUG: Feature keys: {list(features.keys())}")
+    
     return features
 
-def get_audio_features_robust(sp, tracks):
-    """Get audio features with fallback strategies"""
+def predict_personality_debug(features, loaded_models):
+    """DEBUG: Predict personality with detailed logging"""
     
-    st.write("🎵 Getting audio features...")
-    track_ids = [track['id'] for track in tracks if track['id']]
+    st.write("🐛 DEBUG: Starting personality prediction...")
     
-    if not track_ids:
-        st.warning("No valid track IDs found")
-        return create_fallback_features(tracks)
+    if not features:
+        st.error("🐛 DEBUG: No features provided!")
+        return None, None
     
-    all_features = []
+    st.write(f"🐛 DEBUG: Input features count: {len(features)}")
+    st.write(f"🐛 DEBUG: Sample features: {dict(list(features.items())[:5])}")
     
-    # Try smaller batches to avoid rate limiting
-    batch_sizes = [20, 10, 5, 1]
-    
-    for batch_size in batch_sizes:
-        if not track_ids:
-            break
-            
-        st.write(f"Trying batch size {batch_size}...")
-        remaining_ids = track_ids.copy()
-        
-        for i in range(0, len(remaining_ids), batch_size):
-            batch_ids = remaining_ids[i:i+batch_size]
-            
-            try:
-                features = sp.audio_features(batch_ids)
-                if features:
-                    valid_features = [f for f in features if f is not None]
-                    all_features.extend(valid_features)
-                    
-                    # Remove successful IDs
-                    successful_ids = [f['id'] for f in valid_features]
-                    track_ids = [tid for tid in track_ids if tid not in successful_ids]
-                
-                time.sleep(0.5)
-                
-            except Exception as e:
-                if "429" in str(e) or "rate limit" in str(e).lower():
-                    st.warning(f"Rate limited, waiting...")
-                    time.sleep(5)
-                    continue
-                else:
-                    continue
-        
-        if not track_ids:
-            break
-    
-    if all_features:
-        st.success(f"✅ Got audio features for {len(all_features)} tracks")
-        return all_features
-    else:
-        st.warning("⚠️ Could not get audio features - using fallback analysis")
-        return create_fallback_features(tracks)
-
-def create_fallback_features(tracks):
-    """Create estimated audio features when Spotify API fails"""
-    
-    st.info("🔄 Creating estimated audio features based on track metadata...")
-    
-    fallback_features = []
-    
-    for track in tracks:
-        popularity = track.get('popularity', 50)
-        
-        estimated_features = {
-            'id': track['id'],
-            'danceability': 0.5 + (popularity - 50) / 200,
-            'energy': 0.5,
-            'valence': 0.5,
-            'acousticness': 0.3,
-            'instrumentalness': 0.1,
-            'speechiness': 0.1,
-            'loudness': -10,
-            'tempo': 120,
-            'liveness': 0.2,
-            'popularity': popularity,
-            'key': np.random.randint(0, 12),
-            'mode': np.random.randint(0, 2),
-            'time_signature': 4
-        }
-        
-        # Adjust based on genre keywords
-        track_text = f"{track['name']} {track['artists'][0]['name']}".lower()
-        
-        if any(word in track_text for word in ['electronic', 'dance', 'house', 'techno']):
-            estimated_features['danceability'] = 0.8
-            estimated_features['energy'] = 0.8
-            
-        if any(word in track_text for word in ['acoustic', 'folk', 'country']):
-            estimated_features['acousticness'] = 0.8
-            estimated_features['energy'] = 0.3
-            
-        if any(word in track_text for word in ['happy', 'love', 'good']):
-            estimated_features['valence'] = 0.7
-            
-        if any(word in track_text for word in ['sad', 'dark', 'death']):
-            estimated_features['valence'] = 0.3
-        
-        fallback_features.append(estimated_features)
-    
-    st.info(f"Created estimated features for {len(fallback_features)} tracks")
-    return fallback_features
-
-def get_artist_info_robust(sp, tracks):
-    """Get artist info with error handling"""
-    
-    st.write("🎤 Getting artist information...")
-    
-    artist_ids = list(set([track['artists'][0]['id'] for track in tracks if track['artists']]))
-    all_artists = []
-    all_genres = []
-    
-    for i in range(0, len(artist_ids), 20):
-        batch_ids = artist_ids[i:i+20]
-        try:
-            artists_response = sp.artists(batch_ids)
-            batch_artists = artists_response['artists']
-            all_artists.extend(batch_artists)
-            
-            for artist in batch_artists:
-                all_genres.extend(artist.get('genres', []))
-            
-            time.sleep(0.3)
-            
-        except Exception as e:
-            st.warning(f"Error getting artist info: {e}")
-            for track in tracks:
-                if track['artists'][0]['id'] in batch_ids:
-                    all_genres.append('unknown')
-    
-    return {'artists': all_artists, 'genres': all_genres}
-
-# -----------------------------------------------------------------------------
-# Model-Based Personality Prediction 
-# -----------------------------------------------------------------------------
-def predict_personality_with_models(features, loaded_models):
-    """Use trained models to predict personality"""
-    
-    if not loaded_models or not features:
-        return predict_personality_fallback(features)
-    
-    predictions = {}
-    prediction_confidence = {}
-    
-    # Try to use the best available model
-    model_priority = ['behavioral', 'research', 'per']
-    
-    for model_name in model_priority:
+    # Try models in order with detailed error reporting
+    for model_name in ['behavioral', 'research', 'per']:
         if model_name in loaded_models:
+            st.write(f"🐛 DEBUG: Trying {model_name} model...")
+            
             try:
                 model_data = loaded_models[model_name]
                 
                 if model_name == 'behavioral':
-                    predictions, confidence = predict_with_behavioral_model(features, model_data)
-                elif model_name == 'research':
-                    predictions, confidence = predict_with_research_model(features, model_data)
-                elif model_name == 'per':
-                    predictions, confidence = predict_with_per_model(features, model_data)
+                    # Check feature count mismatch
+                    expected_features = model_data.get('feature_lists', {})
+                    if expected_features:
+                        first_trait = list(expected_features.keys())[0]
+                        expected_count = len(expected_features[first_trait])
+                        st.write(f"🐛 DEBUG: Behavioral model expects {expected_count} features, we have {len(features)}")
                 
-                if predictions:
-                    st.success(f"✅ Used {model_name} model for prediction")
-                    return predictions, confidence
+                elif model_name == 'research':
+                    # Try research model
+                    models = model_data.get('models', {})
+                    scalers = model_data.get('scalers', {})
+                    feature_cols = model_data.get('feature_cols', [])
                     
+                    st.write(f"🐛 DEBUG: Research model has {len(models)} trait models")
+                    st.write(f"🐛 DEBUG: Expected feature columns: {feature_cols}")
+                    
+                    if not models:
+                        st.write("🐛 DEBUG: No models found in research data")
+                        continue
+                    
+                    # Create feature vector
+                    feature_vector = []
+                    missing_features = []
+                    
+                    for col in feature_cols:
+                        if col in features:
+                            feature_vector.append(features[col])
+                        else:
+                            feature_vector.append(0.5)  # Default
+                            missing_features.append(col)
+                    
+                    if missing_features:
+                        st.write(f"🐛 DEBUG: Missing features (using defaults): {missing_features}")
+                    
+                    feature_array = np.array(feature_vector).reshape(1, -1)
+                    st.write(f"🐛 DEBUG: Feature array shape: {feature_array.shape}")
+                    st.write(f"🐛 DEBUG: Feature array sample: {feature_array[0][:5]}")
+                    
+                    predictions = {}
+                    confidence = {}
+                    
+                    for trait in models:
+                        try:
+                            scaler = scalers.get(trait)
+                            if scaler:
+                                scaled_features = scaler.transform(feature_array)
+                                st.write(f"🐛 DEBUG: {trait} - scaled features sample: {scaled_features[0][:3]}")
+                            else:
+                                scaled_features = feature_array
+                                st.write(f"🐛 DEBUG: {trait} - no scaler, using raw features")
+                            
+                            prediction = models[trait].predict(scaled_features)[0]
+                            clipped_prediction = np.clip(prediction, 1.0, 5.0)
+                            predictions[trait] = round(clipped_prediction, 2)
+                            confidence[trait] = 0.7
+                            
+                            st.write(f"🐛 DEBUG: {trait} prediction: {prediction:.3f} -> {clipped_prediction:.2f}")
+                            
+                        except Exception as e:
+                            st.write(f"🐛 DEBUG: Error predicting {trait}: {e}")
+                            predictions[trait] = 3.0
+                            confidence[trait] = 0.1
+                    
+                    if predictions:
+                        st.write(f"🐛 DEBUG: Final predictions: {predictions}")
+                        st.session_state.debug_data['predictions'] = predictions
+                        st.session_state.debug_data['model_used'] = model_name
+                        return predictions, confidence
+                
             except Exception as e:
-                st.warning(f"⚠️ Error using {model_name} model: {e}")
+                st.write(f"🐛 DEBUG: Error with {model_name} model: {e}")
+                import traceback
+                st.write(f"🐛 DEBUG: Traceback: {traceback.format_exc()}")
                 continue
     
-    # Fallback to rule-based if all models fail
-    st.info("ℹ️ Using fallback rule-based prediction")
-    predictions = predict_personality_fallback(features)
-    confidence = {trait: 0.6 for trait in predictions.keys()}
-    return predictions, confidence
-
-def predict_with_behavioral_model(features, model_data):
-    """Use the behavioral model we trained"""
-    
-    try:
-        models = model_data['models']
-        scalers = model_data['scalers']
-        selectors = model_data.get('selectors', {})
-        feature_lists = model_data.get('feature_lists', {})
-        
-        predictions = {}
-        confidence = {}
-        
-        for trait in ['Openness', 'Conscientiousness', 'Extraversion', 'Agreeableness', 'Neuroticism']:
-            if trait in models:
-                # Get the features this model expects
-                expected_features = feature_lists.get(trait, list(features.keys()))
-                
-                # Create feature vector
-                feature_vector = []
-                for feature_name in expected_features:
-                    if feature_name in features:
-                        feature_vector.append(features[feature_name])
-                    else:
-                        feature_vector.append(0.5)
-                
-                feature_array = np.array(feature_vector).reshape(1, -1)
-                
-                # Scale features
-                if trait in scalers:
-                    scaled_features = scalers[trait].transform(feature_array)
-                else:
-                    scaled_features = feature_array
-                
-                # Apply feature selection if available
-                if trait in selectors and selectors[trait] is not None:
-                    scaled_features = selectors[trait].transform(scaled_features)
-                
-                # Predict
-                prediction = models[trait].predict(scaled_features)[0]
-                
-                # Clip to valid range
-                prediction = np.clip(prediction, 1.0, 5.0)
-                predictions[trait] = round(prediction, 2)
-                
-                # Calculate confidence
-                perf = model_data.get('performance_results', {}).get(trait, {})
-                model_r2 = perf.get('test_r2', 0.0)
-                confidence[trait] = max(0.1, min(0.9, model_r2 + 0.5))
-        
-        return predictions, confidence
-        
-    except Exception as e:
-        st.error(f"Error in behavioral model prediction: {e}")
-        return None, None
-
-def predict_with_research_model(features, model_data):
-    """Use research-based model"""
-    try:
-        models = model_data.get('models', {})
-        scalers = model_data.get('scalers', {})
-        feature_cols = model_data.get('feature_cols', list(features.keys()))
-        
-        predictions = {}
-        confidence = {}
-        
-        # Create feature vector
-        feature_vector = []
-        for col in feature_cols:
-            if col in features:
-                feature_vector.append(features[col])
-            else:
-                feature_vector.append(0.5)
-        
-        feature_array = np.array(feature_vector).reshape(1, -1)
-        
-        for trait in models:
-            scaler = scalers.get(trait)
-            if scaler:
-                scaled_features = scaler.transform(feature_array)
-            else:
-                scaled_features = feature_array
-            
-            prediction = models[trait].predict(scaled_features)[0]
-            predictions[trait] = round(np.clip(prediction, 1.0, 5.0), 2)
-            confidence[trait] = 0.7
-        
-        return predictions, confidence
-        
-    except Exception as e:
-        st.error(f"Error in research model prediction: {e}")
-        return None, None
-
-def predict_with_per_model(features, model_data):
-    """Use PER dataset model"""
-    try:
-        models = model_data.get('models', {})
-        feature_names = model_data.get('features', list(features.keys()))
-        
-        predictions = {}
-        confidence = {}
-        
-        # Create feature vector
-        feature_vector = []
-        for feature_name in feature_names:
-            if feature_name in features:
-                feature_vector.append(features[feature_name])
-            else:
-                feature_vector.append(0.5)
-        
-        feature_array = np.array(feature_vector).reshape(1, -1)
-        
-        for trait in models:
-            prediction = models[trait].predict(feature_array)[0]
-            predictions[trait] = round(np.clip(prediction, 1.0, 5.0), 2)
-            confidence[trait] = 0.3
-        
-        return predictions, confidence
-        
-    except Exception as e:
-        st.error(f"Error in PER model prediction: {e}")
-        return None, None
-
-def predict_personality_fallback(features):
-    """Fallback rule-based prediction when models fail"""
-    
-    if not features:
-        return {trait: 3.0 for trait in ['Extraversion', 'Openness', 'Conscientiousness', 'Agreeableness', 'Neuroticism']}
-    
-    predictions = {}
-    
-    # EXTRAVERSION
-    extraversion = (
-        features.get('energy_preference', 0.5) * 0.3 +
-        features.get('social_music_score', 0.5) * 0.25 +
-        features.get('danceable_preference', 0.5) * 0.2 +
-        features.get('high_energy_preference', 0.3) * 0.15 +
-        features.get('mainstream_preference', 0.3) * 0.1
-    )
-    predictions['Extraversion'] = np.clip(extraversion * 5, 1, 5)
-    
-    # OPENNESS
-    openness = (
-        features.get('genre_openness', 0.3) * 0.3 +
-        features.get('experimental_preference', 0.1) * 0.2 +
-        features.get('unconventional_preference', 0.3) * 0.2 +
-        features.get('musical_complexity', 0.3) * 0.15 +
-        features.get('acoustic_exploration', 0.3) * 0.15
-    )
-    predictions['Openness'] = np.clip(openness * 5, 1, 5)
-    
-    # CONSCIENTIOUSNESS
-    conscientiousness = (
-        features.get('mainstream_preference', 0.3) * 0.3 +
-        features.get('listening_consistency', 0.8) * 0.25 +
-        features.get('routine_preference', 0.5) * 0.2 +
-        features.get('organized_listening', 0.5) * 0.15 +
-        features.get('predictable_choice', 0.8) * 0.1
-    )
-    predictions['Conscientiousness'] = np.clip(conscientiousness * 5, 1, 5)
-    
-    # AGREEABLENESS
-    agreeableness = (
-        features.get('positive_music_preference', 0.5) * 0.35 +
-        features.get('harmony_seeking', 0.5) * 0.25 +
-        features.get('social_acceptance', 0.5) * 0.2 +
-        features.get('avoid_aggressive', 0.7) * 0.2
-    )
-    predictions['Agreeableness'] = np.clip(agreeableness * 5, 1, 5)
-    
-    # NEUROTICISM
-    neuroticism = (
-        features.get('emotional_music_seeking', 0.5) * 0.3 +
-        features.get('mood_instability', 0.1) * 0.25 +
-        features.get('anxiety_music', 0.3) * 0.2 +
-        features.get('emotional_volatility', 0.1) * 0.15 +
-        features.get('stress_response', 0.3) * 0.1
-    )
-    predictions['Neuroticism'] = np.clip(neuroticism * 5, 1, 5)
-    
-    # Round results
-    for trait in predictions:
-        predictions[trait] = round(predictions[trait], 2)
-    
-    return predictions
-
-# -----------------------------------------------------------------------------
-# UI and Insights
-# -----------------------------------------------------------------------------
-def create_personality_insights(predictions, confidence=None):
-    """Generate personality insights with confidence indicators"""
-    
-    insights = {}
-    
-    descriptions = {
-        'Extraversion': {
-            'high': "You love energetic, social music that gets people moving!",
-            'medium': "You balance energetic and calm music well.",
-            'low': "You prefer introspective, quieter music for personal reflection."
-        },
-        'Openness': {
-            'high': "You're a musical explorer who loves discovering new sounds!",
-            'medium': "You balance familiar and new music nicely.",
-            'low': "You stick to what you know and love - reliable taste!"
-        },
-        'Conscientiousness': {
-            'high': "Your music habits are organized and consistent.",
-            'medium': "You have some structure but stay flexible.",
-            'low': "Your music choices are spontaneous and mood-driven!"
-        },
-        'Agreeableness': {
-            'high': "You love positive, harmonious music that brings people together!",
-            'medium': "You appreciate both uplifting and complex music.",
-            'low': "You're drawn to more intense, unconventional sounds."
-        },
-        'Neuroticism': {
-            'high': "Music is your emotional outlet and processing tool.",
-            'medium': "Your music reflects your varied emotional states.",
-            'low': "You prefer stable, positive music for good vibes."
-        }
+    # Fallback prediction
+    st.write("🐛 DEBUG: Using fallback prediction...")
+    fallback_predictions = {
+        'Extraversion': 3.0,
+        'Openness': 3.0,
+        'Conscientiousness': 3.0,
+        'Agreeableness': 3.0,
+        'Neuroticism': 3.0
     }
     
-    for trait, score in predictions.items():
-        if score >= 3.5:
-            category = 'high'
-        elif score <= 2.5:
-            category = 'low'
-        else:
-            category = 'medium'
-        
-        trait_confidence = confidence.get(trait, 0.6) if confidence else 0.6
-        
-        insights[trait] = {
-            'score': score,
-            'description': descriptions[trait][category],
-            'confidence': trait_confidence
-        }
+    st.session_state.debug_data['predictions'] = fallback_predictions
+    st.session_state.debug_data['model_used'] = 'fallback'
     
-    return insights
+    return fallback_predictions, {'Extraversion': 0.1, 'Openness': 0.1, 'Conscientiousness': 0.1, 'Agreeableness': 0.1, 'Neuroticism': 0.1}
 
-# -----------------------------------------------------------------------------
-# Main App
-# -----------------------------------------------------------------------------
 def main():
-    st.title("Spotify Personality Predictor")
-    st.markdown("### Discover your Big Five personality traits from your music!")
+    st.title("🐛 Spotify Personality Predictor - DEBUG VERSION")
+    st.markdown("### Debug mode to identify why all users get identical results")
     
-    # Load trained models
+    # Load models
     loaded_models = load_trained_models()
     
+    # Authentication
     sp = ensure_spotify_client()
     st.success("Connected to Spotify")
-
-    if st.button("Analyze My Musical Personality", type="primary"):
+    
+    # Show debug data from previous sessions
+    if st.session_state.debug_data:
+        with st.expander("🐛 Previous Session Data"):
+            st.json(st.session_state.debug_data)
+    
+    if st.button("🐛 DEBUG: Analyze My Musical Personality", type="primary"):
         
-        with st.spinner("Collecting and analyzing your music data..."):
-            music_data = get_user_music_data_simplified(sp)
+        # Clear previous debug data
+        st.session_state.debug_data = {}
+        
+        with st.spinner("🐛 DEBUG: Collecting music data..."):
+            music_data = get_user_music_data_debug(sp)
         
         if music_data and music_data['tracks']:
             
-            # Extract features from metadata and enriched data
-            features = create_features_from_metadata(music_data)
+            with st.spinner("🐛 DEBUG: Extracting features..."):
+                features = create_features_from_metadata_debug(music_data)
             
             if features:
-                # Use trained models for prediction
-                with st.spinner("Running personality prediction models..."):
-                    prediction_result = predict_personality_with_models(features, loaded_models)
+                with st.spinner("🐛 DEBUG: Predicting personality..."):
+                    predictions, confidence = predict_personality_debug(features, loaded_models)
                 
-                if isinstance(prediction_result, tuple):
-                    predictions, confidence = prediction_result
-                else:
-                    predictions = prediction_result
-                    confidence = None
-                
-                insights = create_personality_insights(predictions, confidence)
-                
-                # Display results
-                st.header("Your Musical Personality")
-                
-                # Show analysis method
-                st.info("Analysis based on track metadata, genres, popularity patterns, and enriched data from Last.fm")
-                
-                # Create radar chart
-                fig = go.Figure()
-                
-                traits = list(predictions.keys())
-                scores = list(predictions.values())
-                
-                fig.add_trace(go.Scatterpolar(
-                    r=scores,
-                    theta=traits,
-                    fill='toself',
-                    name='Your Personality'
-                ))
-                
-                fig.update_layout(
-                    polar=dict(radialaxis=dict(visible=True, range=[1, 5])),
-                    showlegend=False,
-                    title="Big Five Personality Traits (1-5 scale)",
-                    height=400
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show insights with confidence
-                for trait, insight in insights.items():
-                    conf_text = ""
-                    if confidence and trait in confidence:
-                        conf_percent = confidence[trait] * 100
-                        conf_text = f" (Confidence: {conf_percent:.0f}%)"
+                if predictions:
+                    # Show debug summary
+                    st.header("🐛 DEBUG SUMMARY")
                     
-                    with st.expander(f"{trait}: {insight['score']:.1f}/5.0{conf_text}"):
-                        st.write(insight['description'])
-                        if confidence and trait in confidence:
-                            st.progress(confidence[trait])
-                
-                # Show music analysis
-                st.subheader("Your Music Analysis")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Tracks Analyzed", len(music_data['tracks']))
-                    st.metric("Mainstream Score", f"{features['mainstream_preference']:.0%}")
-                
-                with col2:
-                    st.metric("Unique Genres", features['unique_genres_count'])
-                    st.metric("Genre Diversity", f"{features['genre_diversity']:.2f}")
-                
-                with col3:
-                    st.metric("Artist Diversity", f"{features['artist_diversity']:.2f}")
-                    st.metric("Avg Popularity", f"{features['popularity']:.0%}")
-                
-                # Genre preferences
-                st.subheader("Your Genre Preferences")
-                
-                genre_prefs = {
-                    'Electronic/Dance': features.get('electronic_preference', 0),
-                    'Rock/Alternative': features.get('rock_preference', 0),
-                    'Pop/Mainstream': features.get('pop_preference', 0),
-                    'Hip-Hop/Rap': features.get('hiphop_preference', 0),
-                    'Calm/Acoustic': features.get('calm_preference', 0),
-                    'Experimental': features.get('experimental_preference', 0)
-                }
-                
-                genre_df = pd.DataFrame(list(genre_prefs.items()), columns=['Genre', 'Preference'])
-                st.bar_chart(genre_df.set_index('Genre'))
-                
-                # Model info
-                if loaded_models:
-                    with st.expander("Model Information"):
-                        st.write(f"Using {len(loaded_models)} trained model(s) for prediction")
-                        for model_name in loaded_models.keys():
-                            st.write(f"- {model_name.title()} Model")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("User Data")
+                        st.write(f"User ID: {music_data.get('user_id', 'unknown')}")
+                        st.write(f"Tracks: {len(music_data['tracks'])}")
+                        st.write(f"Artists: {len(set(music_data['artist_names']))}")
+                        st.write(f"Genres: {len(music_data['genres'])}")
+                        
+                    with col2:
+                        st.subheader("Key Features")
+                        if 'feature_summary' in st.session_state.debug_data:
+                            summary = st.session_state.debug_data['feature_summary']
+                            for key, value in summary['key_features'].items():
+                                st.write(f"{key}: {value:.3f}")
+                    
+                    # Show predictions
+                    st.header("Personality Results")
+                    
+                    for trait, score in predictions.items():
+                        conf = confidence.get(trait, 0.5)
+                        st.metric(trait, f"{score:.1f}/5.0", f"Confidence: {conf:.0%}")
+                    
+                    # Show all extracted features for debugging
+                    with st.expander("🐛 All Extracted Features"):
+                        features_df = pd.DataFrame([features]).T
+                        features_df.columns = ['Value']
+                        st.dataframe(features_df)
+                    
+                    # Compare with previous users
+                    st.header("🐛 User Comparison")
+                    st.write("Compare this analysis with previous users to identify if results are identical")
+                    
+                    if 'debug_data' in st.session_state:
+                        st.json(st.session_state.debug_data)
         
         else:
-            st.error("Could not analyze your music. This might be due to API limitations or insufficient listening history.")
-            st.info("Try again later, or make sure you have recent listening activity on Spotify.")
+            st.error("🐛 DEBUG: Could not get music data")
 
 if __name__ == "__main__":
     main()
