@@ -384,7 +384,7 @@ def enrich_with_lastfm(tracks):
     return enriched_data
 
 def create_features_from_metadata(music_data):
-    """Create personality features from track metadata and enriched data"""
+    """Create comprehensive personality features from track metadata and enriched data"""
     
     tracks = music_data['tracks']
     genres = music_data['genres']
@@ -407,122 +407,176 @@ def create_features_from_metadata(music_data):
     artist_tags = enriched_data.get('artist_tags', {})
     artist_popularity = enriched_data.get('artist_popularity', {})
     
-    # Create features based on metadata analysis
+    # Create comprehensive features to match behavioral model (35+ features)
     features = {}
     
-    # Basic popularity and mainstream metrics
+    # Basic popularity and mainstream metrics (5 features)
     features['popularity'] = track_df['popularity'].mean() / 100
     features['mainstream_preference'] = (track_df['popularity'] > 70).mean()
     features['underground_preference'] = (track_df['popularity'] < 30).mean()
     features['explicit_content_ratio'] = track_df['explicit'].mean()
+    features['popularity_variance'] = track_df['popularity'].std() / 100 if len(track_df) > 1 else 0
     
-    # Duration preferences (normalized)
+    # Duration preferences (4 features)
     avg_duration_min = track_df['duration_ms'].mean() / 60000
-    features['song_length_preference'] = min(1.0, avg_duration_min / 5)  # Normalize to 0-1
-    features['short_song_preference'] = (track_df['duration_ms'] < 180000).mean()  # < 3 min
-    features['long_song_preference'] = (track_df['duration_ms'] > 300000).mean()   # > 5 min
+    features['song_length_preference'] = min(1.0, avg_duration_min / 5)
+    features['short_song_preference'] = (track_df['duration_ms'] < 180000).mean()
+    features['long_song_preference'] = (track_df['duration_ms'] > 300000).mean()
+    features['duration_variance'] = (track_df['duration_ms'].std() / 300000) if len(track_df) > 1 else 0
     
-    # Genre and style analysis
+    # Genre and style analysis (8+ features)
     features['genre_diversity'] = len(set(all_genres)) / max(len(all_genres), 1)
-    features['unique_genres_count'] = len(set(all_genres))
+    features['unique_genres_count'] = min(len(set(all_genres)) / 20, 1.0)  # Normalize
     
-    # Analyze genres for personality indicators
+    # Analyze genres for personality indicators with more sensitivity
     genre_text = ' '.join(all_genres).lower()
     
     # Electronic/Dance music (Extraversion)
-    electronic_terms = ['electronic', 'dance', 'house', 'techno', 'edm', 'club', 'party']
+    electronic_terms = ['electronic', 'dance', 'house', 'techno', 'edm', 'club', 'party', 'disco', 'trance']
     features['electronic_preference'] = sum(1 for term in electronic_terms if term in genre_text) / max(len(all_genres), 1)
     
-    # Rock/Metal (Energy/Openness)
-    rock_terms = ['rock', 'metal', 'punk', 'alternative', 'grunge', 'indie']
+    # Rock/Metal/Alternative (Energy/Openness)
+    rock_terms = ['rock', 'metal', 'punk', 'alternative', 'grunge', 'indie rock', 'hard rock', 'heavy metal']
     features['rock_preference'] = sum(1 for term in rock_terms if term in genre_text) / max(len(all_genres), 1)
     
     # Calm/Acoustic (Agreeableness/Neuroticism-)
-    calm_terms = ['acoustic', 'folk', 'ambient', 'chill', 'soft', 'mellow', 'classical']
+    calm_terms = ['acoustic', 'folk', 'ambient', 'chill', 'soft', 'mellow', 'classical', 'singer-songwriter']
     features['calm_preference'] = sum(1 for term in calm_terms if term in genre_text) / max(len(all_genres), 1)
     
     # Hip-hop/Rap (Social/Extraversion)
-    hiphop_terms = ['hip hop', 'rap', 'hip-hop', 'trap', 'drill']
+    hiphop_terms = ['hip hop', 'rap', 'hip-hop', 'trap', 'drill', 'gangsta rap']
     features['hiphop_preference'] = sum(1 for term in hiphop_terms if term in genre_text) / max(len(all_genres), 1)
     
-    # Pop (Mainstream/Agreeableness)
-    pop_terms = ['pop', 'mainstream', 'chart', 'radio']
+    # Pop/Mainstream (Agreeableness)
+    pop_terms = ['pop', 'mainstream', 'chart', 'radio', 'teen pop', 'dance pop']
     features['pop_preference'] = sum(1 for term in pop_terms if term in genre_text) / max(len(all_genres), 1)
     
     # Experimental/Avant-garde (Openness)
-    experimental_terms = ['experimental', 'avant-garde', 'progressive', 'art', 'weird', 'unusual']
+    experimental_terms = ['experimental', 'avant-garde', 'progressive', 'art', 'weird', 'unusual', 'psychedelic']
     features['experimental_preference'] = sum(1 for term in experimental_terms if term in genre_text) / max(len(all_genres), 1)
     
-    # Artist diversity
+    # World/International music (Openness) - This should catch Latino music
+    world_terms = ['latin', 'reggaeton', 'salsa', 'bachata', 'merengue', 'cumbia', 'world', 'international', 'spanish', 'mexican']
+    features['world_preference'] = sum(1 for term in world_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Country/Folk (Traditional values)
+    country_terms = ['country', 'bluegrass', 'americana', 'western']
+    features['country_preference'] = sum(1 for term in country_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Artist and track analysis (10+ features)
     unique_artists = len(set([track['artists'][0]['name'] for track in tracks]))
     features['artist_diversity'] = unique_artists / len(tracks)
+    features['artist_repeat_tendency'] = 1 - (unique_artists / len(tracks))
+    
+    # Track name analysis for emotional content
+    track_names_text = ' '.join([track['name'].lower() for track in tracks])
+    
+    # Emotional keywords in track names
+    positive_words = ['love', 'happy', 'good', 'beautiful', 'wonderful', 'amazing', 'perfect', 'sweet', 'smile']
+    negative_words = ['sad', 'cry', 'pain', 'hurt', 'broken', 'lonely', 'dark', 'death', 'hate', 'angry']
+    party_words = ['party', 'dance', 'night', 'club', 'fun', 'wild', 'crazy', 'celebrate']
+    romantic_words = ['love', 'heart', 'kiss', 'baby', 'honey', 'darling', 'forever', 'together']
+    
+    features['positive_lyrics_preference'] = sum(1 for word in positive_words if word in track_names_text) / len(tracks)
+    features['negative_lyrics_preference'] = sum(1 for word in negative_words if word in track_names_text) / len(tracks)
+    features['party_lyrics_preference'] = sum(1 for word in party_words if word in track_names_text) / len(tracks)
+    features['romantic_lyrics_preference'] = sum(1 for word in romantic_words if word in track_names_text) / len(tracks)
+    
+    # Artist name analysis
+    artist_names_text = ' '.join([track['artists'][0]['name'].lower() for track in tracks])
+    features['indie_artist_preference'] = sum(1 for word in ['indie', 'unknown', 'underground'] if word in artist_names_text) / len(tracks)
     
     # Use Last.fm data if available
     if artist_popularity:
         avg_artist_popularity = np.mean(list(artist_popularity.values()))
-        features['artist_mainstream_score'] = min(1.0, avg_artist_popularity / 1000000)  # Normalize
+        features['artist_mainstream_score'] = min(1.0, avg_artist_popularity / 1000000)
     else:
         features['artist_mainstream_score'] = features['popularity']
     
-    # Create estimated audio-like features from metadata
-    # These are educated guesses based on genre and popularity
+    # Create estimated audio-like features from metadata (more nuanced)
     features['energy_preference'] = (
-        features['electronic_preference'] * 0.4 +
-        features['rock_preference'] * 0.4 +
-        features['hiphop_preference'] * 0.2
+        features['electronic_preference'] * 0.3 +
+        features['rock_preference'] * 0.3 +
+        features['hiphop_preference'] * 0.2 +
+        features['party_lyrics_preference'] * 0.1 +
+        (1 - features['calm_preference']) * 0.1
     )
     
     features['danceability_preference'] = (
-        features['electronic_preference'] * 0.5 +
-        features['pop_preference'] * 0.3 +
-        features['hiphop_preference'] * 0.2
+        features['electronic_preference'] * 0.4 +
+        features['pop_preference'] * 0.2 +
+        features['hiphop_preference'] * 0.2 +
+        features['world_preference'] * 0.1 +  # Latino music is often danceable
+        features['party_lyrics_preference'] * 0.1
     )
     
     features['valence_preference'] = (
-        features['pop_preference'] * 0.4 +
-        features['electronic_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.3
+        features['pop_preference'] * 0.2 +
+        features['positive_lyrics_preference'] * 0.3 +
+        features['romantic_lyrics_preference'] * 0.2 +
+        (1 - features['negative_lyrics_preference']) * 0.2 +
+        (1 - features['explicit_content_ratio']) * 0.1
     )
     
-    features['acousticness_preference'] = features['calm_preference']
+    features['acousticness_preference'] = (
+        features['calm_preference'] * 0.6 +
+        features['country_preference'] * 0.4
+    )
     
     features['musical_sophistication'] = (
-        features['experimental_preference'] * 0.4 +
+        features['experimental_preference'] * 0.3 +
         features['genre_diversity'] * 0.3 +
-        features['artist_diversity'] * 0.3
+        features['artist_diversity'] * 0.2 +
+        features['world_preference'] * 0.1 +  # International music shows sophistication
+        (1 - features['mainstream_preference']) * 0.1
     )
     
-    # Personality-relevant behavioral features
+    # Add additional behavioral features to reach 35+
     features['social_music_score'] = (
         features['pop_preference'] * 0.3 +
-        features['electronic_preference'] * 0.3 +
-        features['mainstream_preference'] * 0.4
+        features['electronic_preference'] * 0.2 +
+        features['mainstream_preference'] * 0.3 +
+        features['party_lyrics_preference'] * 0.2
     )
     
     features['openness_indicators'] = (
-        features['experimental_preference'] * 0.3 +
-        features['genre_diversity'] * 0.3 +
-        features['underground_preference'] * 0.2 +
-        features['artist_diversity'] * 0.2
+        features['experimental_preference'] * 0.25 +
+        features['genre_diversity'] * 0.25 +
+        features['world_preference'] * 0.2 +  # International music shows openness
+        features['underground_preference'] * 0.15 +
+        features['artist_diversity'] * 0.15
     )
     
     features['conscientiousness_indicators'] = (
-        features['mainstream_preference'] * 0.4 +
-        features['pop_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.3
+        features['mainstream_preference'] * 0.3 +
+        features['pop_preference'] * 0.2 +
+        (1 - features['explicit_content_ratio']) * 0.2 +
+        features['artist_repeat_tendency'] * 0.15 +  # Listening to same artists shows routine
+        (1 - features['popularity_variance']) * 0.15  # Consistent popularity shows organization
     )
     
     features['agreeableness_indicators'] = (
-        features['pop_preference'] * 0.3 +
-        features['calm_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.4
+        features['pop_preference'] * 0.25 +
+        features['calm_preference'] * 0.25 +
+        features['positive_lyrics_preference'] * 0.2 +
+        features['romantic_lyrics_preference'] * 0.15 +
+        (1 - features['explicit_content_ratio']) * 0.15
     )
     
     features['neuroticism_indicators'] = (
-        features['explicit_content_ratio'] * 0.3 +
-        (1 - features['valence_preference']) * 0.4 +
-        features['underground_preference'] * 0.3
+        features['negative_lyrics_preference'] * 0.3 +
+        features['explicit_content_ratio'] * 0.2 +
+        features['rock_preference'] * 0.2 +  # Intense music
+        features['underground_preference'] * 0.15 +
+        features['popularity_variance'] * 0.15  # Inconsistent preferences
     )
+    
+    # Additional nuanced features
+    features['cultural_diversity'] = features['world_preference']  # Separate feature for cultural openness
+    features['emotional_complexity'] = (features['positive_lyrics_preference'] + features['negative_lyrics_preference']) / 2
+    features['musical_intensity'] = (features['rock_preference'] + features['electronic_preference']) / 2
+    features['traditional_values'] = features['country_preference']
+    features['introspection_tendency'] = features['calm_preference'] - features['party_lyrics_preference']
     
     # Ensure all values are in [0, 1] range
     for key, value in features.items():
@@ -536,6 +590,7 @@ def create_features_from_metadata(music_data):
         else:
             features[key] = max(0.0, min(1.0, float(value)))
     
+    st.write(f"DEBUG: Generated {len(features)} features")  # Debug info
     return features
 
 def get_audio_features_robust(sp, tracks):
@@ -775,7 +830,6 @@ def predict_with_research_model(features, model_data):
         feature_cols = model_data.get('feature_cols', list(features.keys()))
         
         predictions = {}
-        confidence = {}
         
         # Create feature vector
         feature_vector = []
@@ -796,9 +850,8 @@ def predict_with_research_model(features, model_data):
             
             prediction = models[trait].predict(scaled_features)[0]
             predictions[trait] = round(np.clip(prediction, 1.0, 5.0), 2)
-            confidence[trait] = 0.7
         
-        return predictions, confidence
+        return predictions, None  # No confidence - it was meaningless anyway
         
     except Exception as e:
         st.error(f"Error in research model prediction: {e}")
