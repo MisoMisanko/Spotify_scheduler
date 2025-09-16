@@ -14,7 +14,7 @@ st.set_page_config(page_title="Auth Debug", page_icon="🔧", layout="wide")
 
 def get_spotify_client():
     """Authenticate a user and return a Spotipy client and user profile.
-       Uses a unique cache file per Streamlit session to avoid token leaks.
+       Uses a unique cache file per Streamlit session (and per client ID) to avoid token leaks.
     """
 
     # Assign a unique session ID if this is the first run in this tab
@@ -22,7 +22,8 @@ def get_spotify_client():
         st.session_state.session_id = str(int(time.time() * 1000))
 
     session_id = st.session_state.session_id
-    cache_path = f".cache-{session_id}"
+    # Include the client ID in the cache filename so different apps use different cache files
+    cache_path = f".cache-{CLIENT_ID}-{session_id}"
 
     # Check for auth code returned from Spotify
     params = st.query_params
@@ -35,7 +36,7 @@ def get_spotify_client():
             client_secret=CLIENT_SECRET,
             redirect_uri=REDIRECT_URI,
             scope="user-top-read user-read-recently-played",
-            cache_path=cache_path,       # unique cache per session
+            cache_path=cache_path,       # unique cache per client and session
             show_dialog=True             # always ask user to approve
         )
 
