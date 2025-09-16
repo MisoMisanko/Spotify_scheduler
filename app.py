@@ -1,4 +1,4 @@
-# app.py - Deployment ready Spotify personality app
+# app.py - Public Spotify personality app for any user
 import streamlit as st
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -6,8 +6,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from collections import Counter
-import os
-import urllib.parse
+import time
 
 # Page config
 st.set_page_config(
@@ -17,271 +16,344 @@ st.set_page_config(
 )
 
 class SpotifyPersonalityApp:
-    def __init__(self, client_id, client_secret, redirect_uri):
-        # Comprehensive scope for better analysis
+    def __init__(self):
+        # Get credentials from Streamlit secrets (baked into the app)
+        try:
+            self.client_id = st.secrets["SPOTIFY_CLIENT_ID"]
+            self.client_secret = st.secrets["SPOTIFY_CLIENT_SECRET"]
+            self.redirect_uri = st.secrets["SPOTIFY_REDIRECT_URI"]
+        except KeyError as e:
+            st.error(f"Missing Spotify credential in secrets: {e}")
+            st.stop()
+        
+        # Scope for reading user's music data
         scope = "user-read-recently-played user-top-read user-read-private playlist-read-private user-library-read"
         
-        self.sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=redirect_uri,
+        # Initialize Spotify client
+        self.sp_oauth = SpotifyOAuth(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            redirect_uri=self.redirect_uri,
             scope=scope,
             cache_path=None,  # Don't cache in deployment
             show_dialog=True
-        ))
+        )
+        
+        self.sp = None
     
-    def get_user_music_features(self, limit=50):
-        """Extract meaningful features from user's Spotify data"""
+    def get_auth_url(self):
+        """Get Spotify authorization URL"""
+        return self.sp_oauth.get_authorize_url()
+    
+    def authenticate_user(self, code):
+        """Authenticate user with authorization code"""
         try:
-            # Get comprehensive user data
-            user_data = {}
+            token_info = self.sp_oauth.get_access_token(code)
+            if token_info:
+                self.sp = spotipy.Spotify(auth=token_info['access_token'])
+                return True
+        except Exception as e:
+            st.error(f"Authentication failed: {e}")
+        return False
+    
+    def get_user_music_data(self, limit=50):
+        """Get user's music data with PROPER audio features handling"""
+        if not self.sp:
+            return None
+        
+        try:
+            # Get user's top tracks from different time periods
+            st.write("🎵 Fetching your top tracks...")
+            top_tracks_data = {}
             
-            # Get top tracks from different time ranges
-            user_data['short_term'] = self.sp.current_user_top_tracks(limit=limit, time_range='short_term')
-            user_data['medium_term'] = self.sp.current_user_top_tracks(limit=limit, time_range='medium_term')
-            user_data['long_term'] = self.sp.current_user_top_tracks(limit=limit, time_range='long_term')
+            for time_range in ['short_term', 'medium_term', 'long_term']:
+                try:
+                    tracks = self.sp.current_user_top_tracks(limit=limit, time_range=time_range)
+                    top_tracks_data[time_range] = tracks['items']
+                    st.write(f"✅ Got {len(tracks['items'])} tracks from {time_range.replace('_', ' ')}")
+                except Exception as e:
+                    st.warning(f"Could not get {time_range} tracks: {e}")
+                    top_tracks_data[time_range] = []
             
             # Get recent tracks
-            user_data['recent'] = self.sp.current_user_recently_played(limit=limit)
+            st.write("🎵 Fetching your recent listening history...")
+            try:
+                recent_tracks = self.sp.current_user_recently_played(limit=limit)
+                recent_tracks_list = [item['track'] for item in recent_tracks['items']]
+                st.write(f"✅ Got {len(recent_tracks_list)} recent tracks")
+            except Exception as e:
+                st.warning(f"Could not get recent tracks: {e}")
+                recent_tracks_list = []
             
-            # Collect all track IDs
-            all_track_ids = []
+            # Combine all tracks
             all_tracks = []
+            for tracks in top_tracks_data.values():
+                all_tracks.extend(tracks)
+            all_tracks.extend(recent_tracks_list)
             
-            # From top tracks
-            for time_range in ['short_term', 'medium_term', 'long_term']:
-                for track in user_data[time_range]['items']:
-                    all_track_ids.append(track['id'])
-                    all_tracks.append(track)
-            
-            # From recent tracks
-            for item in user_data['recent']['items']:
-                track = item['track']
-                all_track_ids.append(track['id'])
-                all_tracks.append(track)
-            
-            if not all_track_ids:
+            if not all_tracks:
+                st.error("No tracks found. Make sure you have some listening history on Spotify!")
                 return None
             
-            # Remove duplicates while preserving order
-            unique_track_ids = list(dict.fromkeys(all_track_ids))
+            # Remove duplicates
+            seen_ids = set()
+            unique_tracks = []
+            for track in all_tracks:
+                if track['id'] not in seen_ids:
+                    unique_tracks.append(track)
+                    seen_ids.add(track['id'])
             
-            # Get audio features (Spotify limits to 100 per request)
-            audio_features = []
-            for i in range(0, len(unique_track_ids), 100):
-                batch = unique_track_ids[i:i+100]
-                features = self.sp.audio_features(batch)
-                audio_features.extend([f for f in features if f is not None])
+            st.write(f"🎯 Processing {len(unique_tracks)} unique tracks...")
             
-            if not audio_features:
+            # Get audio features - THIS IS THE KEY FIX
+            st.write("🎵 Getting audio features...")
+            track_ids = [track['id'] for track in unique_tracks if track['id']]
+            
+            # Spotify audio_features() can handle up to 100 tracks per request
+            all_audio_features = []
+            for i in range(0, len(track_ids), 100):
+                batch_ids = track_ids[i:i+100]
+                st.write(f"   Processing batch {i//100 + 1}/{(len(track_ids)-1)//100 + 1}...")
+                
+                try:
+                    batch_features = self.sp.audio_features(batch_ids)
+                    # Filter out None responses
+                    valid_features = [f for f in batch_features if f is not None]
+                    all_audio_features.extend(valid_features)
+                    st.write(f"   ✅ Got features for {len(valid_features)} tracks in this batch")
+                    
+                    # Small delay to avoid rate limiting
+                    time.sleep(0.1)
+                    
+                except Exception as e:
+                    st.warning(f"Error getting audio features for batch: {e}")
+                    continue
+            
+            if not all_audio_features:
+                st.error("❌ Could not get audio features for any tracks!")
+                st.info("This might be due to:")
+                st.info("• Spotify API rate limiting")
+                st.info("• Tracks not having audio features available")
+                st.info("• Network connectivity issues")
                 return None
             
-            # Get artist genres for diversity calculation
-            artist_ids = list(set([track['artists'][0]['id'] for track in all_tracks]))
-            artists_data = []
+            st.success(f"✅ Successfully got audio features for {len(all_audio_features)} tracks!")
             
-            # Get artists in batches of 50 (Spotify limit)
-            for i in range(0, len(artist_ids), 50):
-                batch = artist_ids[i:i+50]
-                artists = self.sp.artists(batch)
-                artists_data.extend(artists['artists'])
+            # Get artists for genre analysis
+            st.write("🎤 Getting artist information...")
+            artist_ids = list(set([track['artists'][0]['id'] for track in unique_tracks if track['artists']]))
             
-            # Calculate genre diversity
+            all_artists = []
+            for i in range(0, len(artist_ids), 50):  # Max 50 artists per request
+                batch_ids = artist_ids[i:i+50]
+                try:
+                    artists_response = self.sp.artists(batch_ids)
+                    all_artists.extend(artists_response['artists'])
+                    time.sleep(0.1)
+                except Exception as e:
+                    st.warning(f"Error getting artist info: {e}")
+            
+            # Collect all genres
             all_genres = []
-            for artist in artists_data:
-                all_genres.extend(artist['genres'])
+            for artist in all_artists:
+                all_genres.extend(artist.get('genres', []))
             
-            genre_diversity = len(set(all_genres)) / max(len(all_genres), 1)
-            unique_genres = len(set(all_genres))
+            st.success(f"✅ Found {len(set(all_genres))} unique genres in your music!")
             
-            # Calculate artist diversity  
-            unique_artists = len(set([track['artists'][0]['id'] for track in all_tracks]))
-            artist_diversity = unique_artists / max(len(all_tracks), 1)
-            
-            # Process audio features
-            features_df = pd.DataFrame(audio_features)
-            
-            # Calculate behavioral features
-            user_features = {
-                # Basic audio features
-                'energy': features_df['energy'].mean(),
-                'danceability': features_df['danceability'].mean(),
-                'valence': features_df['valence'].mean(),
-                'acousticness': features_df['acousticness'].mean(),
-                'instrumentalness': features_df['instrumentalness'].mean(),
-                'speechiness': features_df['speechiness'].mean(),
-                'loudness': features_df['loudness'].mean(),
-                'tempo': features_df['tempo'].mean(),
-                'liveness': features_df['liveness'].mean(),
-                
-                # Popularity and mainstream preference
-                'popularity': features_df['popularity'].mean(),
-                'mainstream_preference': (features_df['popularity'] > 70).mean(),
-                
-                # Diversity metrics
-                'genre_diversity': genre_diversity,
-                'unique_genres': unique_genres,
-                'artist_diversity': artist_diversity,
-                
-                # Emotional patterns
-                'emotional_variance': features_df['valence'].std(),
-                'energy_variance': features_df['energy'].std(),
-                'positive_music_ratio': (features_df['valence'] > 0.6).mean(),
-                'high_energy_ratio': (features_df['energy'] > 0.7).mean(),
-                'danceable_ratio': (features_df['danceability'] > 0.7).mean(),
-                
-                # Complexity indicators
-                'instrumental_ratio': (features_df['instrumentalness'] > 0.5).mean(),
-                'acoustic_ratio': (features_df['acousticness'] > 0.5).mean(),
-                'live_music_ratio': (features_df['liveness'] > 0.8).mean(),
-                
-                # Musical characteristics
-                'tempo_variance': features_df['tempo'].std(),
-                'key_diversity': len(features_df['key'].unique()) / 12,
-                'mode_diversity': len(features_df['mode'].unique()) / 2,
-                
-                # Time-based consistency (simplified)
-                'listening_consistency': 0.7,  # Would calculate from actual listening patterns
+            return {
+                'tracks': unique_tracks,
+                'audio_features': all_audio_features,
+                'artists': all_artists,
+                'genres': all_genres
             }
             
-            return user_features, features_df, all_genres[:20]  # Return sample genres for display
-            
         except Exception as e:
-            st.error(f"Error fetching user data: {e}")
-            return None, None, None
+            st.error(f"Error fetching music data: {e}")
+            return None
     
-    def predict_personality_research_based(self, features):
-        """Predict personality using research-backed rules"""
+    def extract_personality_features(self, music_data):
+        """Extract features for personality prediction"""
         
-        # Research-backed personality prediction rules
-        personality_scores = {}
+        audio_features = music_data['audio_features']
+        genres = music_data['genres']
         
-        # EXTRAVERSION - energetic, social, outgoing music
-        extraversion_score = (
+        # Convert to DataFrame for easier analysis
+        df = pd.DataFrame(audio_features)
+        
+        # Calculate behavioral features
+        features = {
+            # Basic audio characteristics
+            'energy': df['energy'].mean(),
+            'danceability': df['danceability'].mean(), 
+            'valence': df['valence'].mean(),
+            'acousticness': df['acousticness'].mean(),
+            'instrumentalness': df['instrumentalness'].mean(),
+            'speechiness': df['speechiness'].mean(),
+            'loudness': df['loudness'].mean(),
+            'tempo': df['tempo'].mean(),
+            'liveness': df['liveness'].mean(),
+            
+            # Popularity and mainstream preference
+            'popularity': df['popularity'].mean(),
+            'mainstream_preference': (df['popularity'] > 70).mean(),
+            'unpopular_preference': (df['popularity'] < 30).mean(),
+            
+            # Diversity metrics
+            'genre_diversity': len(set(genres)) / max(len(genres), 1),
+            'unique_genres_count': len(set(genres)),
+            'artist_diversity': len(set([f['id'] for f in audio_features])) / len(audio_features),
+            
+            # Emotional and energy patterns
+            'emotional_variance': df['valence'].std(),
+            'energy_variance': df['energy'].std(),
+            'tempo_variance': df['tempo'].std(),
+            
+            # Musical preferences (ratios)
+            'positive_music_ratio': (df['valence'] > 0.6).mean(),
+            'negative_music_ratio': (df['valence'] < 0.4).mean(),
+            'high_energy_ratio': (df['energy'] > 0.7).mean(),
+            'low_energy_ratio': (df['energy'] < 0.3).mean(),
+            'danceable_ratio': (df['danceability'] > 0.7).mean(),
+            'acoustic_ratio': (df['acousticness'] > 0.5).mean(),
+            'instrumental_ratio': (df['instrumentalness'] > 0.5).mean(),
+            'live_music_ratio': (df['liveness'] > 0.8).mean(),
+            'speech_ratio': (df['speechiness'] > 0.66).mean(),
+            
+            # Complexity indicators
+            'musical_complexity': (df['acousticness'] + df['instrumentalness']).mean() / 2,
+            'mainstream_avoidance': 1 - (df['popularity'].mean() / 100),
+            
+            # Key and mode diversity
+            'key_diversity': len(df['key'].unique()) / 12,
+            'mode_diversity': len(df['mode'].unique()) / 2,
+            'time_signature_diversity': len(df['time_signature'].unique()) / 7,
+        }
+        
+        return features
+    
+    def predict_personality(self, features):
+        """Predict Big Five personality traits using research-backed approach"""
+        
+        predictions = {}
+        
+        # EXTRAVERSION - Social, energetic, outgoing
+        # Research: Extraverts prefer energetic, upbeat, conventional music
+        extraversion = (
             features['energy'] * 0.25 +
-            features['danceability'] * 0.25 +
-            (features['loudness'] + 60) / 60 * 0.15 +  # Normalize loudness
+            features['danceability'] * 0.20 +
             features['valence'] * 0.15 +
-            features['high_energy_ratio'] * 0.10 +
-            features['danceable_ratio'] * 0.10
+            features['high_energy_ratio'] * 0.15 +
+            features['danceable_ratio'] * 0.10 +
+            (features['loudness'] + 60) / 60 * 0.10 +  # Normalize loudness (-60 to 0)
+            features['mainstream_preference'] * 0.05
         )
-        personality_scores['Extraversion'] = np.clip(extraversion_score * 5, 1, 5)
+        predictions['Extraversion'] = np.clip(extraversion * 5, 1, 5)
         
-        # OPENNESS - diverse, complex, experimental music
-        openness_score = (
-            features['genre_diversity'] * 0.20 +
+        # OPENNESS - Creative, curious, open to new experiences
+        # Research: Open people prefer complex, unconventional, diverse music
+        openness = (
+            features['genre_diversity'] * 0.25 +
             features['artist_diversity'] * 0.15 +
-            features['instrumentalness'] * 0.15 +
-            (1 - features['mainstream_preference']) * 0.15 +
-            features['acousticness'] * 0.10 +
-            features['speechiness'] * 0.10 +
-            features['key_diversity'] * 0.10 +
-            (1 - features['popularity'] / 100) * 0.05  # Less popular = more open
+            features['mainstream_avoidance'] * 0.15 +
+            features['instrumentalness'] * 0.10 +
+            features['musical_complexity'] * 0.10 +
+            features['key_diversity'] * 0.08 +
+            features['time_signature_diversity'] * 0.07 +
+            features['unpopular_preference'] * 0.10
         )
-        personality_scores['Openness'] = np.clip(openness_score * 5, 1, 5)
+        predictions['Openness'] = np.clip(openness * 5, 1, 5)
         
-        # CONSCIENTIOUSNESS - consistent, mainstream, organized
-        conscientiousness_score = (
-            features['mainstream_preference'] * 0.25 +
-            features['listening_consistency'] * 0.20 +
-            (features['popularity'] / 100) * 0.15 +
-            (1 - features['emotional_variance']) * 0.15 +
-            (1 - features['energy_variance']) * 0.10 +
-            features['danceability'] * 0.10 +
-            (1 - features['genre_diversity']) * 0.05  # Less diversity = more conscientious
+        # CONSCIENTIOUSNESS - Organized, disciplined, conventional
+        # Research: Conscientious people prefer mainstream, predictable music
+        conscientiousness = (
+            features['mainstream_preference'] * 0.30 +
+            (1 - features['emotional_variance']) * 0.20 +
+            (1 - features['energy_variance']) * 0.15 +
+            features['popularity'] / 100 * 0.15 +
+            (1 - features['genre_diversity']) * 0.10 +
+            features['danceability'] * 0.10
         )
-        personality_scores['Conscientiousness'] = np.clip(conscientiousness_score * 5, 1, 5)
+        predictions['Conscientiousness'] = np.clip(conscientiousness * 5, 1, 5)
         
-        # AGREEABLENESS - positive, harmonious, popular music
-        agreeableness_score = (
+        # AGREEABLENESS - Cooperative, trusting, helpful
+        # Research: Agreeable people prefer positive, harmonious, conventional music
+        agreeableness = (
             features['valence'] * 0.30 +
             features['positive_music_ratio'] * 0.20 +
+            (1 - features['negative_music_ratio']) * 0.15 +
             features['mainstream_preference'] * 0.15 +
-            (1 - features['loudness'] / -60) * 0.10 +  # Quieter music
-            features['danceability'] * 0.10 +
-            (1 - features['energy_variance']) * 0.10 +
-            features['acoustic_ratio'] * 0.05
+            features['acoustic_ratio'] * 0.10 +
+            (1 - features['loudness'] / -60) * 0.10  # Prefer quieter music
         )
-        personality_scores['Agreeableness'] = np.clip(agreeableness_score * 5, 1, 5)
+        predictions['Agreeableness'] = np.clip(agreeableness * 5, 1, 5)
         
-        # NEUROTICISM - emotional, variable, less positive music
-        neuroticism_score = (
+        # NEUROTICISM - Emotional instability, anxiety, moodiness
+        # Research: Neurotic people prefer sad, emotional, complex music
+        neuroticism = (
             (1 - features['valence']) * 0.25 +
             features['emotional_variance'] * 0.20 +
+            features['negative_music_ratio'] * 0.15 +
             features['energy_variance'] * 0.15 +
-            (1 - features['positive_music_ratio']) * 0.15 +
+            (1 - features['positive_music_ratio']) * 0.10 +
             features['acousticness'] * 0.10 +
-            (1 - features['danceability']) * 0.10 +
-            features['speechiness'] * 0.05
+            (1 - features['danceability']) * 0.05
         )
-        personality_scores['Neuroticism'] = np.clip(neuroticism_score * 5, 1, 5)
+        predictions['Neuroticism'] = np.clip(neuroticism * 5, 1, 5)
         
         # Round to 2 decimal places
-        for trait in personality_scores:
-            personality_scores[trait] = round(personality_scores[trait], 2)
+        for trait in predictions:
+            predictions[trait] = round(predictions[trait], 2)
         
-        return personality_scores
-
-def get_deployment_redirect_uri():
-    """Get the correct redirect URI for current deployment"""
-    
-    # Check if running on Streamlit Cloud
-    if 'STREAMLIT_SERVER_PORT' in os.environ:
-        # Get the current URL from Streamlit
-        try:
-            # This works for Streamlit Cloud
-            return f"https://{st.experimental_get_query_params().get('streamlit_url', [''])[0]}"
-        except:
-            pass
-    
-    # Fallback options
-    return "http://localhost:8501/"  # Default Streamlit port
+        return predictions
 
 def create_personality_insights(predictions):
-    """Generate personality insights and descriptions"""
+    """Generate detailed personality insights"""
     
     insights = {}
     
-    trait_descriptions = {
+    descriptions = {
         'Extraversion': {
-            'high': "🎉 You love energetic, social music! Your playlist probably gets the party started. You're drawn to upbeat, danceable tracks that match your outgoing personality.",
-            'medium': "🎵 You enjoy a good mix of energetic and chill music, adapting to different social situations and moods.",
-            'low': "🎧 You prefer quieter, more introspective music. Perfect for solo listening and deep thinking sessions."
+            'high': "🎉 **Social Music Lover!** You gravitate toward energetic, danceable music that gets people moving. Your playlists are perfect for parties and social gatherings. You likely enjoy mainstream hits and music that creates a fun, social atmosphere.",
+            'medium': "🎵 **Balanced Social Energy** - You enjoy both upbeat social music and quieter personal listening. Your taste adapts well to different social situations.",
+            'low': "🎧 **Introspective Listener** - You prefer quieter, more contemplative music perfect for solo listening and reflection. You value music as personal experience over social sharing."
         },
         'Openness': {
-            'high': "🎨 You're a musical explorer! You love discovering new artists, genres, and experimental sounds. Your taste is unique and adventurous.",
-            'medium': "🎼 You balance familiar favorites with new discoveries, enjoying both mainstream hits and hidden gems.",
-            'low': "📻 You know what you like! You stick to familiar genres and artists that consistently deliver what you enjoy."
+            'high': "🎨 **Musical Explorer!** You're always discovering new artists, genres, and experimental sounds. You love unusual music that others might not 'get' and take pride in your unique taste. You probably have incredibly diverse playlists.",
+            'medium': "🎼 **Curious but Grounded** - You balance musical exploration with familiar favorites. You enjoy discovering new music but also appreciate established artists.",
+            'low': "📻 **Reliable Favorites** - You know what you like and stick with it! You prefer familiar genres and artists that consistently deliver what you enjoy. There's comfort in musical predictability."
         },
         'Conscientiousness': {
-            'high': "📋 Your music habits are well-organized! You probably have carefully curated playlists and consistent listening routines.",
-            'medium': "⚖️ You balance structure with spontaneity in your music choices.",
-            'low': "🎲 Your music taste is spontaneous and varied - you follow your mood wherever it takes you!"
+            'high': "📋 **Organized Music Habits** - Your music listening is structured and consistent. You probably have well-organized playlists, stick to routines, and prefer mainstream music that 'makes sense.' You like musical reliability.",
+            'medium': "⚖️ **Structured but Flexible** - You have some organization in your music habits but can be spontaneous when the mood strikes.",
+            'low': "🎲 **Spontaneous Music Spirit** - Your musical choices are driven by mood and moment! You're not tied to routines and enjoy letting your musical taste wander wherever it wants to go."
         },
         'Agreeableness': {
-            'high': "🤝 You love music that brings people together! You prefer positive, harmonious songs that create good vibes for everyone.",
-            'medium': "🎶 You enjoy both uplifting music and more complex emotional expressions.",
-            'low': "🎸 You're drawn to more intense or unconventional music that others might find challenging."
+            'high': "🤝 **Harmony Seeker** - You love music that brings people together! You prefer positive, uplifting songs that create good vibes. You probably enjoy music that most people can appreciate and sing along to.",
+            'medium': "🎶 **Emotionally Balanced** - You appreciate both uplifting music and more complex emotional expressions, adapting to different social contexts.",
+            'low': "🎸 **Edge Appreciator** - You're drawn to more intense, unconventional, or emotionally complex music. You don't need everyone to 'get' your music taste - you value authenticity over popularity."
         },
         'Neuroticism': {
-            'high': "💭 Your music reflects emotional depth and complexity. You may use music to process feelings and find comfort during difficult times.",
-            'medium': "🌊 You enjoy both emotionally rich and stable, calming music depending on your state of mind.",
-            'low': "☀️ You prefer stable, positive music that maintains good vibes and emotional balance."
+            'high': "💭 **Emotional Music Connection** - Music is your emotional outlet! You're drawn to songs that match and help you process complex feelings. You might use music therapeutically and appreciate artists who aren't afraid of emotional depth.",
+            'medium': "🌊 **Mood-Responsive Listening** - Your music choices reflect your emotional state, ranging from comforting to energizing depending on what you need.",
+            'low': "☀️ **Stable Mood Music** - You prefer music that maintains positive vibes and emotional balance. You use music to stay upbeat rather than to process difficult emotions."
         }
     }
     
     for trait, score in predictions.items():
         if score >= 3.5:
             category = 'high'
+            level = 'High'
         elif score <= 2.5:
-            category = 'low'
+            category = 'low' 
+            level = 'Low'
         else:
             category = 'medium'
+            level = 'Moderate'
         
         insights[trait] = {
             'score': score,
-            'category': category,
-            'description': trait_descriptions[trait][category]
+            'level': level,
+            'description': descriptions[trait][category]
         }
     
     return insights
@@ -290,206 +362,167 @@ def main():
     st.title("🎵 Spotify Personality Predictor")
     st.markdown("### Discover your Big Five personality traits based on your Spotify listening habits!")
     
-    # Instructions for getting Spotify credentials
-    with st.expander("🔑 How to get Spotify API credentials", expanded=False):
+    # Check if we have the auth code in URL
+    query_params = st.experimental_get_query_params()
+    
+    # Initialize the app
+    app = SpotifyPersonalityApp()
+    
+    # Handle authentication flow
+    if 'code' in query_params:
+        # User has returned from Spotify auth
+        auth_code = query_params['code'][0]
+        
+        with st.spinner("🔐 Authenticating with Spotify..."):
+            if app.authenticate_user(auth_code):
+                st.success("✅ Successfully connected to your Spotify account!")
+                
+                # Get and analyze music data
+                with st.spinner("🎵 Analyzing your music library... This may take a moment..."):
+                    music_data = app.get_user_music_data()
+                
+                if music_data:
+                    # Extract features and predict personality
+                    features = app.extract_personality_features(music_data)
+                    predictions = app.predict_personality(features)
+                    insights = create_personality_insights(predictions)
+                    
+                    # Display results
+                    st.header("🎯 Your Musical Personality Profile")
+                    
+                    # Radar chart
+                    fig = go.Figure()
+                    
+                    traits = list(predictions.keys())
+                    scores = list(predictions.values())
+                    
+                    fig.add_trace(go.Scatterpolar(
+                        r=scores,
+                        theta=traits,
+                        fill='toself',
+                        name='Your Personality',
+                        line_color='rgb(34, 139, 34)',
+                        fillcolor='rgba(34, 139, 34, 0.3)'
+                    ))
+                    
+                    fig.update_layout(
+                        polar=dict(
+                            radialaxis=dict(
+                                visible=True,
+                                range=[1, 5],
+                                tickmode='linear',
+                                tick0=1,
+                                dtick=1
+                            )),
+                        showlegend=False,
+                        title={
+                            'text': "Your Big Five Personality Traits (1-5 scale)",
+                            'x': 0.5,
+                            'font': {'size': 20}
+                        },
+                        height=500
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Personality breakdown
+                    st.header("📝 Your Personality Analysis")
+                    
+                    for trait, insight in insights.items():
+                        with st.expander(f"**{trait}**: {insight['score']:.1f}/5.0 - {insight['level']}"):
+                            st.markdown(insight['description'])
+                            st.progress(insight['score'] / 5.0)
+                    
+                    # Music statistics
+                    st.header("🎼 Your Music Statistics")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("🎵 Tracks Analyzed", len(music_data['audio_features']))
+                        st.metric("⚡ Avg Energy", f"{features['energy']:.2f}")
+                        st.metric("💃 Avg Danceability", f"{features['danceability']:.2f}")
+                    
+                    with col2:
+                        st.metric("🌍 Unique Genres", features['unique_genres_count'])
+                        st.metric("😊 Avg Positivity", f"{features['valence']:.2f}")
+                        st.metric("🎸 Acousticness", f"{features['acousticness']:.2f}")
+                    
+                    with col3:
+                        st.metric("📈 Avg Popularity", f"{features['popularity']:.0f}/100")
+                        st.metric("🎼 Instrumentalness", f"{features['instrumentalness']:.2f}")
+                        st.metric("🎤 Speechiness", f"{features['speechiness']:.2f}")
+                    
+                    with col4:
+                        st.metric("🎹 Key Diversity", f"{features['key_diversity']:.2f}")
+                        st.metric("🔄 Genre Diversity", f"{features['genre_diversity']:.2f}")
+                        st.metric("🎯 Mainstream %", f"{features['mainstream_preference']:.0%}")
+                    
+                    # Genre breakdown
+                    if music_data['genres']:
+                        st.header("🎵 Your Music Genres")
+                        genre_counts = Counter(music_data['genres'])
+                        top_genres = dict(genre_counts.most_common(10))
+                        
+                        genre_df = pd.DataFrame(list(top_genres.items()), columns=['Genre', 'Count'])
+                        st.bar_chart(genre_df.set_index('Genre'))
+                    
+                    # Try again button
+                    if st.button("🔄 Analyze Again"):
+                        st.experimental_rerun()
+                
+            else:
+                st.error("❌ Authentication failed. Please try again.")
+                if st.button("🔄 Try Again"):
+                    st.experimental_rerun()
+    
+    else:
+        # Show login page
         st.markdown("""
-        1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/)
-        2. Log in with your Spotify account
-        3. Click **"Create App"**
-        4. Fill in:
-           - **App name**: "My Personality App"
-           - **App description**: "Personality prediction from music"
-           - **Redirect URI**: `https://your-app-name.streamlit.app/` (replace with your actual URL)
-        5. Copy your **Client ID** and **Client Secret**
-        6. Come back here and enter them below!
+        ### How it works:
+        1. 🔐 **Connect your Spotify** - We'll analyze your listening history
+        2. 🎵 **We analyze your music** - Looking at audio features, genres, and listening patterns  
+        3. 🧠 **Get your personality profile** - Based on psychological research about music and personality
+        4. 📊 **See detailed insights** - Learn what your music taste reveals about you!
+        
+        ### What we analyze:
+        - 🎼 **Audio features** (energy, danceability, positivity, etc.)
+        - 🌍 **Genre diversity** and exploration patterns
+        - 📈 **Popularity preferences** (mainstream vs. niche)
+        - 🎯 **Listening consistency** and habits
+        
+        **Ready to discover your musical personality?**
         """)
-    
-    # Sidebar for credentials
-    st.sidebar.title("🎵 Spotify Setup")
-    
-    # Get current app URL for redirect URI hint
-    try:
-        current_url = st.experimental_get_query_params()
-        if current_url:
-            suggested_redirect = "https://your-app-name.streamlit.app/"
-        else:
-            suggested_redirect = "http://localhost:8501/"
-    except:
-        suggested_redirect = "https://your-app-name.streamlit.app/"
-    
-    st.sidebar.info(f"💡 Your redirect URI should be:\n`{suggested_redirect}`")
-    
-    # Try to get credentials from Streamlit secrets first
-    try:
-        client_id = st.secrets["SPOTIFY_CLIENT_ID"]
-        client_secret = st.secrets["SPOTIFY_CLIENT_SECRET"]
-        st.sidebar.success("✅ Using credentials from Streamlit secrets")
         
-        # Get redirect URI from secrets or use default
-        try:
-            redirect_uri = st.secrets["SPOTIFY_REDIRECT_URI"]
-        except KeyError:
-            redirect_uri = suggested_redirect
-            st.sidebar.info(f"Using default redirect URI: {redirect_uri}")
+        # Get auth URL and display login button
+        auth_url = app.get_auth_url()
         
-    except KeyError:
-        # Fallback to manual input if secrets not available
-        st.sidebar.warning("⚠️ Spotify credentials not found in secrets")
+        st.markdown(f"""
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{auth_url}" target="_self">
+                <button style="
+                    background-color: #1DB954;
+                    color: white;
+                    padding: 15px 30px;
+                    font-size: 18px;
+                    border: none;
+                    border-radius: 50px;
+                    cursor: pointer;
+                    text-decoration: none;
+                    display: inline-block;
+                ">
+                    🎵 Connect with Spotify
+                </button>
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
         
-        # Input fields
-        client_id = st.sidebar.text_input("Spotify Client ID", type="password", help="From your Spotify app dashboard")
-        client_secret = st.sidebar.text_input("Spotify Client Secret", type="password", help="From your Spotify app dashboard")
+        st.markdown("""
+        ---
         
-        # Allow custom redirect URI
-        redirect_uri = st.sidebar.text_input("Redirect URI", value=suggested_redirect, help="Must match your Spotify app settings")
-        
-        if not client_id or not client_secret:
-            st.warning("👆 Please enter your Spotify API credentials in the sidebar to get started!")
-            st.info("Don't have Spotify credentials? Click the 🔑 section above to learn how to get them!")
-            return
-    
-    # Initialize app
-    try:
-        app = SpotifyPersonalityApp(client_id, client_secret, redirect_uri)
-        
-        st.sidebar.success("✅ Spotify credentials loaded!")
-        
-        # Main analysis button
-        if st.button("🎯 Analyze My Music Personality", type="primary"):
-            
-            with st.spinner("🎵 Fetching your Spotify data..."):
-                try:
-                    result = app.get_user_music_features()
-                    
-                    if result is None:
-                        st.error("❌ Could not fetch your Spotify data. Please check your credentials and try again.")
-                        return
-                    
-                    features, audio_features_df, sample_genres = result
-                    
-                    st.success(f"✅ Analyzed {len(audio_features_df)} tracks from your library!")
-                    
-                except Exception as e:
-                    st.error(f"❌ Error fetching data: {e}")
-                    st.info("💡 Make sure you have some listening history in Spotify and try again.")
-                    return
-            
-            with st.spinner("🧠 Analyzing your personality..."):
-                # Predict personality
-                predictions = app.predict_personality_research_based(features)
-                insights = create_personality_insights(predictions)
-            
-            # Display results
-            st.header("🎯 Your Musical Personality Profile")
-            
-            # Create radar chart
-            fig = go.Figure()
-            
-            traits = list(predictions.keys())
-            scores = list(predictions.values())
-            
-            fig.add_trace(go.Scatterpolar(
-                r=scores,
-                theta=traits,
-                fill='toself',
-                name='Your Personality',
-                line_color='rgb(34, 139, 34)',
-                fillcolor='rgba(34, 139, 34, 0.3)'
-            ))
-            
-            fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[1, 5],
-                        tickmode='linear',
-                        tick0=1,
-                        dtick=1
-                    )),
-                showlegend=False,
-                title={
-                    'text': "Your Big Five Personality Traits",
-                    'x': 0.5,
-                    'font': {'size': 20}
-                },
-                height=500
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Display personality scores and insights
-            st.header("📝 Your Personality Breakdown")
-            
-            for trait, insight in insights.items():
-                with st.expander(f"**{trait}**: {insight['score']}/5.0 ({insight['category'].title()})"):
-                    st.write(insight['description'])
-                    
-                    # Progress bar for visual representation
-                    progress = insight['score'] / 5.0
-                    st.progress(progress)
-            
-            # Music characteristics
-            st.header("🎼 Your Music DNA")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("🎵 Energy Level", f"{features['energy']:.2f}", help="How energetic your music is (0-1)")
-                st.metric("💃 Danceability", f"{features['danceability']:.2f}", help="How danceable your music is (0-1)")
-                st.metric("😊 Positivity", f"{features['valence']:.2f}", help="How positive/happy your music is (0-1)")
-            
-            with col2:
-                st.metric("🎸 Acousticness", f"{features['acousticness']:.2f}", help="How acoustic vs electric your music is (0-1)")
-                st.metric("🎼 Instrumentalness", f"{features['instrumentalness']:.2f}", help="How much instrumental music you like (0-1)")
-                st.metric("📈 Popularity", f"{features['popularity']:.0f}/100", help="How mainstream your music taste is")
-            
-            with col3:
-                st.metric("🌍 Genre Diversity", f"{features['unique_genres']}", help="Number of unique genres in your music")
-                st.metric("🎨 Artist Variety", f"{features['artist_diversity']:.2f}", help="How diverse your artist choices are (0-1)")
-                st.metric("🎯 Mainstream Score", f"{features['mainstream_preference']:.2f}", help="How much you prefer popular music (0-1)")
-            
-            # Show some genres
-            if sample_genres:
-                st.header("🎵 Your Music Genres")
-                genre_text = ", ".join(sample_genres[:15])
-                st.write(f"**Sample genres from your music:** {genre_text}")
-            
-            # Fun facts
-            st.header("🎉 Fun Facts About Your Music")
-            facts = []
-            
-            if features['energy'] > 0.7:
-                facts.append("⚡ You love high-energy music that gets your blood pumping!")
-            elif features['energy'] < 0.3:
-                facts.append("🌙 You prefer calm, low-energy music for relaxation.")
-            
-            if features['danceability'] > 0.7:
-                facts.append("💃 Your music could definitely get a party started!")
-            
-            if features['valence'] > 0.7:
-                facts.append("😊 You're drawn to positive, uplifting music!")
-            elif features['valence'] < 0.3:
-                facts.append("🎭 You appreciate more melancholic or complex emotional music.")
-            
-            if features['genre_diversity'] > 0.5:
-                facts.append("🌈 You're a musical explorer with diverse taste!")
-            
-            if features['mainstream_preference'] > 0.7:
-                facts.append("📻 You know what's popular and you like it!")
-            elif features['mainstream_preference'] < 0.3:
-                facts.append("🎧 You're a musical hipster who avoids the mainstream!")
-            
-            for fact in facts:
-                st.info(fact)
-            
-            # Share results
-            st.header("📱 Share Your Results")
-            share_text = f"I just discovered my musical personality! My top traits: {max(predictions.items(), key=lambda x: x[1])[0]} ({max(predictions.values()):.1f}/5.0). Check yours: [Your App URL]"
-            st.code(share_text, language=None)
-    
-    except Exception as e:
-        st.error(f"❌ Error initializing Spotify connection: {e}")
-        st.info("💡 Double-check your Client ID, Client Secret, and make sure your Redirect URI matches exactly what you set in your Spotify app settings.")
+        **Privacy Note:** We only read your music data to generate your personality profile. 
+        We don't store your data or access your private information beyond what's needed for the analysis.
+        """)
 
 if __name__ == "__main__":
     main()
