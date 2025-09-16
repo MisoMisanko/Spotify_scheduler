@@ -1,4 +1,4 @@
-# app.py - Fixed Spotify Personality Predictor with Proper User Isolation
+# app.py - Complete Spotify Personality Predictor using TRAINED MODELS
 import os
 import time
 import streamlit as st
@@ -46,7 +46,7 @@ else:
     st.sidebar.info("ℹ️ Last.fm API not configured")
 
 # -----------------------------------------------------------------------------
-# FIXED Authentication with Session-Specific Cache Files
+# FIXED Authentication - ONLY CHANGE
 # -----------------------------------------------------------------------------
 def ensure_spotify_client():
     """Fixed authentication using session-specific cache files"""
@@ -146,6 +146,242 @@ def load_trained_models():
         st.sidebar.info("ℹ️ No trained models found - using fallback prediction")
     
     return loaded_models
+
+def create_model_features_from_spotify_data(music_data):
+    """Create features that match what the trained models expect"""
+    
+    audio_features = music_data['audio_features']
+    genres = music_data['genres']
+    tracks = music_data['tracks']
+    
+    if not audio_features:
+        return None
+    
+    df = pd.DataFrame(audio_features)
+    
+    # Create features that match the behavioral model training
+    features = {
+        # Basic audio features (matching training data)
+        'energy_preference': df['energy'].mean(),
+        'social_music_score': (df['valence'] + df['danceability']).mean() / 2,
+        'high_energy_preference': (df['energy'] > 0.7).astype(int).mean(),
+        'danceable_preference': df['danceability'].mean(),
+        'loudness_preference': (df['loudness'] + 60) / 60,  # Normalize to 0-1
+        'tempo_preference': df['tempo'].mean() / 200,  # Normalize
+        
+        # Openness features
+        'musical_complexity': (df['acousticness'] + df['instrumentalness']).mean() / 2,
+        'experimental_preference': df['instrumentalness'].mean(),
+        'acoustic_exploration': df['acousticness'].mean(),
+        'instrumental_preference': df['instrumentalness'].mean(),
+        'genre_openness': len(set(genres)) / max(len(genres), 1),
+        'unconventional_preference': 1 - (df['popularity'].mean() / 100),
+        
+        # Conscientiousness features
+        'listening_consistency': 1 - df['valence'].std() if len(df) > 1 else 0.8,
+        'routine_preference': df['popularity'].mean() / 100,
+        'completion_tendency': df['energy'].mean(),  # Proxy for not skipping
+        'organized_listening': (df['popularity'] > 50).mean(),
+        'mainstream_preference': (df['popularity'] > 70).mean(),
+        'predictable_choice': 1 - df['energy'].std() if len(df) > 1 else 0.8,
+        
+        # Agreeableness features
+        'positive_music_preference': df['valence'].mean(),
+        'mellow_preference': 1 - df['energy'].mean(),
+        'harmony_seeking': df['valence'].mean(),
+        'avoid_aggressive': 1 - (df['energy'] * (1 - df['valence'])).mean(),
+        'social_acceptance': (df['valence'] + df['danceability']).mean() / 2,
+        'cooperative_music': df['acousticness'].mean(),
+        
+        # Neuroticism features
+        'emotional_music_seeking': 1 - df['valence'].mean(),
+        'mood_instability': df['valence'].std() if len(df) > 1 else 0.1,
+        'anxiety_music': ((1 - df['valence']) * df['energy']).mean(),
+        'comfort_seeking': df['acousticness'].mean(),
+        'emotional_volatility': df['energy'].std() if len(df) > 1 else 0.1,
+        'stress_response': (1 - df['valence']).mean(),
+        
+        # General features
+        'music_sophistication': (df['acousticness'] + df['instrumentalness']).mean() / 2,
+        'emotional_regulation': df['valence'].mean(),
+        'stimulation_seeking': df['energy'].mean(),
+        'mood_management': df['valence'].mean(),
+        'musical_engagement': df['danceability'].mean(),
+    }
+    
+    # Ensure all values are in [0, 1] range
+    for key, value in features.items():
+        # Handle pandas Series or numpy arrays
+        if hasattr(value, 'item'):  # pandas Series or numpy scalar
+            value = value.item() if hasattr(value, 'item') else float(value)
+        elif hasattr(value, '__len__') and not isinstance(value, str):  # Handle arrays/series
+            value = float(value.mean() if hasattr(value, 'mean') else value[0])
+        
+        if pd.isna(value) or value is None:
+            features[key] = 0.5
+        else:
+            features[key] = max(0.0, min(1.0, float(value)))
+    
+    return features
+
+# -----------------------------------------------------------------------------
+# Last.fm Integration for Data Enrichment
+# -----------------------------------------------------------------------------
+def get_lastfm_artist_info(artist_name):
+    """Get additional artist info from Last.fm using your API key"""
+    if not LASTFM_API_KEY:
+        return None
+    
+    try:
+        url = "http://ws.audioscrobbler.com/2.0/"
+        params = {
+            'method': 'artist.getInfo',
+            'artist': artist_name,
+            'api_key': LASTFM_API_KEY,
+            'format': 'json'
+        }
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'artist' in data:
+                artist_info = data['artist']
+                return {
+                    'tags': [tag['name'] for tag in artist_info.get('tags', {}).get('tag', [])],
+                    'listeners': int(artist_info.get('stats', {}).get('listeners', 0)),
+                    'playcount': int(artist_info.get('stats', {}).get('playcount', 0)),
+                    'bio_summary': artist_info.get('bio', {}).get('summary', ''),
+                    'similar_artists': [artist['name'] for artist in artist_info.get('similar', {}).get('artist', [])]
+                }
+    except Exception as e:
+        print(f"Last.fm API error for {artist_name}: {e}")
+    return None
+
+def enrich_with_musicbrainz(artist_name):
+    """Get genre info from MusicBrainz (free, no API key needed)"""
+    try:
+        # Search for artist
+        search_url = f"https://musicbrainz.org/ws/2/artist/?query={artist_name}&fmt=json&limit=1"
+        headers = {'User-Agent': 'SpotifyPersonalityApp/1.0'}
+        
+        response = requests.get(search_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            artists = data.get('artists', [])
+            if artists:
+                artist_id = artists[0]['id']
+                
+                # Get detailed artist info
+                detail_url = f"https://musicbrainz.org/ws/2/artist/{artist_id}?inc=tags&fmt=json"
+                detail_response = requests.get(detail_url, headers=headers, timeout=5)
+                
+                if detail_response.status_code == 200:
+                    detail_data = detail_response.json()
+                    tags = detail_data.get('tags', [])
+                    return [tag['name'] for tag in tags if tag.get('count', 0) > 0]
+        
+        time.sleep(1)  # Rate limiting
+    except:
+        pass
+    return []
+
+# -----------------------------------------------------------------------------
+# Robust Music Data Collection with Fallbacks
+# -----------------------------------------------------------------------------
+def get_user_music_data_simplified(sp, limit=50):
+    """Get user's music data focusing on track metadata instead of audio features"""
+    
+    music_data = {
+        'tracks': [],
+        'artists': [],
+        'genres': [],
+        'enriched_data': {}
+    }
+    
+    try:
+        st.write("🎵 Fetching your music library...")
+        
+        all_tracks = []
+        
+        # Get tracks from multiple sources
+        for time_range in ['short_term', 'medium_term', 'long_term']:
+            try:
+                tracks = sp.current_user_top_tracks(limit=limit, time_range=time_range)
+                all_tracks.extend(tracks['items'])
+                st.write(f"✅ Got {len(tracks['items'])} tracks from {time_range}")
+            except Exception as e:
+                st.warning(f"Could not get {time_range} tracks: {e}")
+        
+        # Get recent tracks
+        try:
+            recent = sp.current_user_recently_played(limit=limit)
+            recent_tracks = [item['track'] for item in recent['items']]
+            all_tracks.extend(recent_tracks)
+            st.write(f"✅ Got {len(recent_tracks)} recent tracks")
+        except Exception as e:
+            st.warning(f"Could not get recent tracks: {e}")
+        
+        if not all_tracks:
+            st.error("No tracks found. Make sure you have listening history!")
+            return None
+        
+        # Remove duplicates
+        seen_ids = set()
+        unique_tracks = []
+        for track in all_tracks:
+            if track['id'] and track['id'] not in seen_ids:
+                unique_tracks.append(track)
+                seen_ids.add(track['id'])
+        
+        music_data['tracks'] = unique_tracks
+        st.success(f"📊 Found {len(unique_tracks)} unique tracks")
+        
+        # Get artist info for genres (this usually works)
+        artists_info = get_artist_info_robust(sp, unique_tracks)
+        music_data['artists'] = artists_info['artists']
+        music_data['genres'] = artists_info['genres']
+        
+        # Enrich with Last.fm if available
+        if LASTFM_API_KEY:
+            st.write("🌍 Enriching with Last.fm data...")
+            enriched_data = enrich_with_lastfm(unique_tracks)
+            music_data['enriched_data'] = enriched_data
+        
+        return music_data
+        
+    except Exception as e:
+        st.error(f"Error collecting music data: {e}")
+        return None
+
+def enrich_with_lastfm(tracks):
+    """Enrich track data using Last.fm"""
+    enriched_data = {
+        'artist_tags': {},
+        'track_tags': {},
+        'artist_popularity': {},
+        'genres_enriched': []
+    }
+    
+    # Process a sample of tracks to avoid API limits
+    sample_tracks = tracks[:20]  # Limit to avoid too many API calls
+    
+    for i, track in enumerate(sample_tracks):
+        if i % 5 == 0:
+            st.write(f"   Enriching track {i+1}/{len(sample_tracks)}")
+        
+        artist_name = track['artists'][0]['name']
+        track_name = track['name']
+        
+        # Get artist info
+        if artist_name not in enriched_data['artist_tags']:
+            artist_info = get_lastfm_artist_info(artist_name)
+            if artist_info:
+                enriched_data['artist_tags'][artist_name] = artist_info.get('tags', [])
+                enriched_data['artist_popularity'][artist_name] = artist_info.get('listeners', 0)
+                enriched_data['genres_enriched'].extend(artist_info.get('tags', []))
+        
+        time.sleep(0.2)  # Rate limiting
+    
+    return enriched_data
 
 def create_features_from_metadata(music_data):
     """Create personality features from track metadata and enriched data"""
@@ -302,133 +538,109 @@ def create_features_from_metadata(music_data):
     
     return features
 
-# -----------------------------------------------------------------------------
-# Last.fm Integration for Data Enrichment
-# -----------------------------------------------------------------------------
-def get_lastfm_artist_info(artist_name):
-    """Get additional artist info from Last.fm using your API key"""
-    if not LASTFM_API_KEY:
-        return None
+def get_audio_features_robust(sp, tracks):
+    """Get audio features with fallback strategies"""
     
-    try:
-        url = "http://ws.audioscrobbler.com/2.0/"
-        params = {
-            'method': 'artist.getInfo',
-            'artist': artist_name,
-            'api_key': LASTFM_API_KEY,
-            'format': 'json'
-        }
-        response = requests.get(url, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if 'artist' in data:
-                artist_info = data['artist']
-                return {
-                    'tags': [tag['name'] for tag in artist_info.get('tags', {}).get('tag', [])],
-                    'listeners': int(artist_info.get('stats', {}).get('listeners', 0)),
-                    'playcount': int(artist_info.get('stats', {}).get('playcount', 0)),
-                    'bio_summary': artist_info.get('bio', {}).get('summary', ''),
-                    'similar_artists': [artist['name'] for artist in artist_info.get('similar', {}).get('artist', [])]
-                }
-    except Exception as e:
-        print(f"Last.fm API error for {artist_name}: {e}")
-    return None
-
-def enrich_with_musicbrainz(artist_name):
-    """Get genre info from MusicBrainz (free, no API key needed)"""
-    try:
-        # Search for artist
-        search_url = f"https://musicbrainz.org/ws/2/artist/?query={artist_name}&fmt=json&limit=1"
-        headers = {'User-Agent': 'SpotifyPersonalityApp/1.0'}
-        
-        response = requests.get(search_url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            artists = data.get('artists', [])
-            if artists:
-                artist_id = artists[0]['id']
-                
-                # Get detailed artist info
-                detail_url = f"https://musicbrainz.org/ws/2/artist/{artist_id}?inc=tags&fmt=json"
-                detail_response = requests.get(detail_url, headers=headers, timeout=5)
-                
-                if detail_response.status_code == 200:
-                    detail_data = detail_response.json()
-                    tags = detail_data.get('tags', [])
-                    return [tag['name'] for tag in tags if tag.get('count', 0) > 0]
-        
-        time.sleep(1)  # Rate limiting
-    except:
-        pass
-    return []
-
-# -----------------------------------------------------------------------------
-# Music Data Collection with Proper User Isolation (Metadata Only)
-# -----------------------------------------------------------------------------
-def get_user_music_data_simplified(sp, limit=50):
-    """Get user's music data focusing on track metadata instead of audio features"""
+    st.write("🎵 Getting audio features...")
+    track_ids = [track['id'] for track in tracks if track['id']]
     
-    music_data = {
-        'tracks': [],
-        'artists': [],
-        'genres': [],
-        'enriched_data': {}
-    }
+    if not track_ids:
+        st.warning("No valid track IDs found")
+        return create_fallback_features(tracks)
     
-    try:
-        st.write("🎵 Fetching your music library...")
+    all_features = []
+    
+    # Try smaller batches to avoid rate limiting
+    batch_sizes = [20, 10, 5, 1]
+    
+    for batch_size in batch_sizes:
+        if not track_ids:
+            break
+            
+        st.write(f"Trying batch size {batch_size}...")
+        remaining_ids = track_ids.copy()
         
-        all_tracks = []
-        
-        # Get tracks from multiple sources
-        for time_range in ['short_term', 'medium_term', 'long_term']:
+        for i in range(0, len(remaining_ids), batch_size):
+            batch_ids = remaining_ids[i:i+batch_size]
+            
             try:
-                tracks = sp.current_user_top_tracks(limit=limit, time_range=time_range)
-                all_tracks.extend(tracks['items'])
-                st.write(f"✅ Got {len(tracks['items'])} tracks from {time_range}")
+                features = sp.audio_features(batch_ids)
+                if features:
+                    valid_features = [f for f in features if f is not None]
+                    all_features.extend(valid_features)
+                    
+                    # Remove successful IDs
+                    successful_ids = [f['id'] for f in valid_features]
+                    track_ids = [tid for tid in track_ids if tid not in successful_ids]
+                
+                time.sleep(0.5)
+                
             except Exception as e:
-                st.warning(f"Could not get {time_range} tracks: {e}")
+                if "429" in str(e) or "rate limit" in str(e).lower():
+                    st.warning(f"Rate limited, waiting...")
+                    time.sleep(5)
+                    continue
+                else:
+                    continue
         
-        # Get recent tracks
-        try:
-            recent = sp.current_user_recently_played(limit=limit)
-            recent_tracks = [item['track'] for item in recent['items']]
-            all_tracks.extend(recent_tracks)
-            st.write(f"✅ Got {len(recent_tracks)} recent tracks")
-        except Exception as e:
-            st.warning(f"Could not get recent tracks: {e}")
+        if not track_ids:
+            break
+    
+    if all_features:
+        st.success(f"✅ Got audio features for {len(all_features)} tracks")
+        return all_features
+    else:
+        st.warning("⚠️ Could not get audio features - using fallback analysis")
+        return create_fallback_features(tracks)
+
+def create_fallback_features(tracks):
+    """Create estimated audio features when Spotify API fails"""
+    
+    st.info("🔄 Creating estimated audio features based on track metadata...")
+    
+    fallback_features = []
+    
+    for track in tracks:
+        popularity = track.get('popularity', 50)
         
-        if not all_tracks:
-            st.error("No tracks found. Make sure you have listening history!")
-            return None
+        estimated_features = {
+            'id': track['id'],
+            'danceability': 0.5 + (popularity - 50) / 200,
+            'energy': 0.5,
+            'valence': 0.5,
+            'acousticness': 0.3,
+            'instrumentalness': 0.1,
+            'speechiness': 0.1,
+            'loudness': -10,
+            'tempo': 120,
+            'liveness': 0.2,
+            'popularity': popularity,
+            'key': np.random.randint(0, 12),
+            'mode': np.random.randint(0, 2),
+            'time_signature': 4
+        }
         
-        # Remove duplicates
-        seen_ids = set()
-        unique_tracks = []
-        for track in all_tracks:
-            if track['id'] and track['id'] not in seen_ids:
-                unique_tracks.append(track)
-                seen_ids.add(track['id'])
+        # Adjust based on genre keywords
+        track_text = f"{track['name']} {track['artists'][0]['name']}".lower()
         
-        music_data['tracks'] = unique_tracks
-        st.success(f"📊 Found {len(unique_tracks)} unique tracks")
+        if any(word in track_text for word in ['electronic', 'dance', 'house', 'techno']):
+            estimated_features['danceability'] = 0.8
+            estimated_features['energy'] = 0.8
+            
+        if any(word in track_text for word in ['acoustic', 'folk', 'country']):
+            estimated_features['acousticness'] = 0.8
+            estimated_features['energy'] = 0.3
+            
+        if any(word in track_text for word in ['happy', 'love', 'good']):
+            estimated_features['valence'] = 0.7
+            
+        if any(word in track_text for word in ['sad', 'dark', 'death']):
+            estimated_features['valence'] = 0.3
         
-        # Get artist info for genres (this usually works)
-        artists_info = get_artist_info_robust(sp, unique_tracks)
-        music_data['artists'] = artists_info['artists']
-        music_data['genres'] = artists_info['genres']
-        
-        # Enrich with Last.fm if available
-        if LASTFM_API_KEY:
-            st.write("🌍 Enriching with Last.fm data...")
-            enriched_data = enrich_with_lastfm(unique_tracks)
-            music_data['enriched_data'] = enriched_data
-        
-        return music_data
-        
-    except Exception as e:
-        st.error(f"Error collecting music data: {e}")
-        return None
+        fallback_features.append(estimated_features)
+    
+    st.info(f"Created estimated features for {len(fallback_features)} tracks")
+    return fallback_features
 
 def get_artist_info_robust(sp, tracks):
     """Get artist info with error handling"""
@@ -459,39 +671,8 @@ def get_artist_info_robust(sp, tracks):
     
     return {'artists': all_artists, 'genres': all_genres}
 
-def enrich_with_lastfm(tracks):
-    """Enrich track data using Last.fm"""
-    enriched_data = {
-        'artist_tags': {},
-        'track_tags': {},
-        'artist_popularity': {},
-        'genres_enriched': []
-    }
-    
-    # Process a sample of tracks to avoid API limits
-    sample_tracks = tracks[:20]  # Limit to avoid too many API calls
-    
-    for i, track in enumerate(sample_tracks):
-        if i % 5 == 0:
-            st.write(f"   Enriching track {i+1}/{len(sample_tracks)}")
-        
-        artist_name = track['artists'][0]['name']
-        track_name = track['name']
-        
-        # Get artist info
-        if artist_name not in enriched_data['artist_tags']:
-            artist_info = get_lastfm_artist_info(artist_name)
-            if artist_info:
-                enriched_data['artist_tags'][artist_name] = artist_info.get('tags', [])
-                enriched_data['artist_popularity'][artist_name] = artist_info.get('listeners', 0)
-                enriched_data['genres_enriched'].extend(artist_info.get('tags', []))
-        
-        time.sleep(0.2)  # Rate limiting
-    
-    return enriched_data
-
 # -----------------------------------------------------------------------------
-# Model-Based Personality Prediction (same as original)
+# Model-Based Personality Prediction 
 # -----------------------------------------------------------------------------
 def predict_personality_with_models(features, loaded_models):
     """Use trained models to predict personality"""
@@ -533,6 +714,7 @@ def predict_personality_with_models(features, loaded_models):
 
 def predict_with_behavioral_model(features, model_data):
     """Use the behavioral model we trained"""
+    
     try:
         models = model_data['models']
         scalers = model_data['scalers']
@@ -716,7 +898,7 @@ def predict_personality_fallback(features):
     return predictions
 
 # -----------------------------------------------------------------------------
-# UI and Insights (same as original)
+# UI and Insights
 # -----------------------------------------------------------------------------
 def create_personality_insights(predictions, confidence=None):
     """Generate personality insights with confidence indicators"""
@@ -770,36 +952,31 @@ def create_personality_insights(predictions, confidence=None):
     return insights
 
 # -----------------------------------------------------------------------------
-# Main App with Fixed Authentication
+# Main App
 # -----------------------------------------------------------------------------
 def main():
     st.title("Spotify Personality Predictor")
     st.markdown("### Discover your Big Five personality traits from your music!")
     
-    # Show session info in sidebar for debugging
-    if "session_id" in st.session_state:
-        st.sidebar.write(f"Session: {st.session_state.session_id[:8]}...")
-    
     # Load trained models
     loaded_models = load_trained_models()
     
-    # Fixed authentication
     sp = ensure_spotify_client()
     
-    # Show authenticated user
+    # Show authenticated user (ONLY CHANGE - show who is logged in)
     if hasattr(st.session_state, 'user') and st.session_state.user:
         user = st.session_state.user
-        st.success(f"Logged in as: {user.get('display_name', 'Unknown')} ({user.get('id', 'Unknown')})")
+        st.success(f"Connected to Spotify - Logged in as: {user.get('display_name', 'Unknown')} ({user.get('id', 'Unknown')})")
 
     if st.button("Analyze My Musical Personality", type="primary"):
         
         with st.spinner("Collecting and analyzing your music data..."):
-            music_data = get_user_music_data(sp)
+            music_data = get_user_music_data_simplified(sp)
         
         if music_data and music_data['tracks']:
             
-            # Extract features
-            features = create_model_features_from_spotify_data(music_data)
+            # Extract features from metadata and enriched data
+            features = create_features_from_metadata(music_data)
             
             if features:
                 # Use trained models for prediction
@@ -818,7 +995,7 @@ def main():
                 st.header("Your Musical Personality")
                 
                 # Show analysis method
-                st.info("Analysis based on your unique Spotify data using trained ML models")
+                st.info("Analysis based on track metadata, genres, popularity patterns, and enriched data from Last.fm")
                 
                 # Create radar chart
                 fig = go.Figure()
@@ -860,43 +1037,30 @@ def main():
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Tracks Analyzed", len(music_data['tracks']))
-                    if features.get('mainstream_preference'):
-                        st.metric("Mainstream Score", f"{features['mainstream_preference']:.0%}")
+                    st.metric("Mainstream Score", f"{features['mainstream_preference']:.0%}")
                 
                 with col2:
-                    st.metric("Unique Genres", len(set(music_data['genres'])))
-                    if features.get('genre_openness'):
-                        st.metric("Genre Diversity", f"{features['genre_openness']:.2f}")
+                    st.metric("Unique Genres", features['unique_genres_count'])
+                    st.metric("Genre Diversity", f"{features['genre_diversity']:.2f}")
                 
                 with col3:
-                    unique_artists = len(set([track['artists'][0]['name'] for track in music_data['tracks']]))
-                    st.metric("Unique Artists", unique_artists)
-                    if music_data['audio_features']:
-                        avg_energy = np.mean([f['energy'] for f in music_data['audio_features'] if f])
-                        st.metric("Avg Energy", f"{avg_energy:.2f}")
-                
-                # Audio features visualization
-                if music_data['audio_features']:
-                    st.subheader("Your Audio Profile")
-                    
-                    audio_df = pd.DataFrame(music_data['audio_features'])
-                    audio_means = {
-                        'Energy': audio_df['energy'].mean(),
-                        'Danceability': audio_df['danceability'].mean(),
-                        'Valence': audio_df['valence'].mean(),
-                        'Acousticness': audio_df['acousticness'].mean(),
-                        'Instrumentalness': audio_df['instrumentalness'].mean()
-                    }
-                    
-                    audio_chart_df = pd.DataFrame(list(audio_means.items()), columns=['Feature', 'Score'])
-                    st.bar_chart(audio_chart_df.set_index('Feature'))
+                    st.metric("Artist Diversity", f"{features['artist_diversity']:.2f}")
+                    st.metric("Avg Popularity", f"{features['popularity']:.0%}")
                 
                 # Genre preferences
-                if music_data['genres']:
-                    st.subheader("Your Top Genres")
-                    genre_counts = Counter(music_data['genres']).most_common(10)
-                    genre_df = pd.DataFrame(genre_counts, columns=['Genre', 'Count'])
-                    st.bar_chart(genre_df.set_index('Genre'))
+                st.subheader("Your Genre Preferences")
+                
+                genre_prefs = {
+                    'Electronic/Dance': features.get('electronic_preference', 0),
+                    'Rock/Alternative': features.get('rock_preference', 0),
+                    'Pop/Mainstream': features.get('pop_preference', 0),
+                    'Hip-Hop/Rap': features.get('hiphop_preference', 0),
+                    'Calm/Acoustic': features.get('calm_preference', 0),
+                    'Experimental': features.get('experimental_preference', 0)
+                }
+                
+                genre_df = pd.DataFrame(list(genre_prefs.items()), columns=['Genre', 'Preference'])
+                st.bar_chart(genre_df.set_index('Genre'))
                 
                 # Model info
                 if loaded_models:
@@ -904,13 +1068,6 @@ def main():
                         st.write(f"Using {len(loaded_models)} trained model(s) for prediction")
                         for model_name in loaded_models.keys():
                             st.write(f"- {model_name.title()} Model")
-                
-                # User verification (for debugging)
-                if hasattr(st.session_state, 'user'):
-                    with st.expander("User Verification"):
-                        user = st.session_state.user
-                        st.write(f"Analysis for: {user.get('display_name', 'Unknown')} ({user.get('id', 'Unknown')})")
-                        st.write(f"Session ID: {st.session_state.session_id}")
         
         else:
             st.error("Could not analyze your music. This might be due to API limitations or insufficient listening history.")
