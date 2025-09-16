@@ -1,4 +1,4 @@
-# app.py - DEBUG VERSION to identify why all users get same results
+# app.py - USER-ISOLATED DEBUG VERSION
 import os
 import time
 import streamlit as st
@@ -7,11 +7,9 @@ from spotipy.oauth2 import SpotifyOAuth
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from collections import Counter
-import requests
-import json
-import joblib
-from sklearn.preprocessing import StandardScaler
+import hashlib
+import uuid
+from datetime import datetime
 
 # Spotify credentials
 SCOPES = (
@@ -26,13 +24,9 @@ CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")
 
-# Last.fm credentials
-LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY")
-LASTFM_SHARED_SECRET = os.environ.get("LASTFM_SHARED_SECRET")
-
 st.set_page_config(
-    page_title="Spotify Personality Predictor - DEBUG",
-    page_icon="🐛",
+    page_title="Spotify Debug - User Isolated",
+    page_icon="🔐",
     layout="wide"
 )
 
@@ -40,128 +34,173 @@ if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
     st.error("Missing Spotify credentials")
     st.stop()
 
-# DEBUG: Add session state to track user-specific data
-if 'debug_data' not in st.session_state:
-    st.session_state.debug_data = {}
+# CRITICAL: Generate unique session ID to prevent cross-user contamination
+if 'session_uuid' not in st.session_state:
+    st.session_state.session_uuid = str(uuid.uuid4())
+    st.session_state.session_start = datetime.now().isoformat()
 
-# Authentication functions (same as before)
+def clear_all_caches():
+    """Force clear all Streamlit caches to prevent data leakage"""
+    st.cache_data.clear()
+    st.cache_resource.clear()
+
 def get_auth_manager():
+    """Create a fresh auth manager with unique state parameter"""
+    # Use session UUID to ensure unique auth state
+    unique_state = f"spotify_auth_{st.session_state.session_uuid}"
+    
     return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
         scope=SCOPES,
         open_browser=False,
-        cache_path=None,
+        cache_path=None,  # NEVER cache tokens
+        state=unique_state,  # Unique state per session
+        show_dialog=True  # Force login dialog every time
     )
 
 def ensure_spotify_client():
+    """Ensure fresh Spotify client with NO session state reuse"""
+    
+    # Display session info for debugging
+    st.sidebar.write(f"🔐 Session ID: {st.session_state.session_uuid[:8]}...")
+    st.sidebar.write(f"🔐 Session Start: {st.session_state.session_start}")
+    
     auth_manager = get_auth_manager()
-    token_info = st.session_state.get("token_info")
-
-    if token_info and not auth_manager.is_token_expired(token_info):
-        return spotipy.Spotify(auth=token_info["access_token"])
-
+    
+    # Check for authorization code in URL (fresh login)
     params = st.query_params
     if "code" in params:
         code = params["code"]
-        token_info = auth_manager.get_access_token(code, as_dict=True)
-        st.session_state["token_info"] = token_info
-        st.query_params.clear()
-        st.rerun()
-
+        state = params.get("state", "")
+        
+        # Verify state matches our session
+        expected_state = f"spotify_auth_{st.session_state.session_uuid}"
+        if state != expected_state:
+            st.error("🔐 DEBUG: State mismatch - potential session contamination!")
+            st.write(f"Expected: {expected_state}")
+            st.write(f"Received: {state}")
+            st.stop()
+        
+        try:
+            # Get fresh token
+            token_info = auth_manager.get_access_token(code, as_dict=True)
+            
+            # Store token with session-specific key
+            token_key = f"token_{st.session_state.session_uuid}"
+            st.session_state[token_key] = token_info
+            
+            st.query_params.clear()
+            st.success("🔐 Fresh authentication successful!")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"🔐 Authentication error: {e}")
+            st.stop()
+    
+    # Check for existing valid token for THIS session only
+    token_key = f"token_{st.session_state.session_uuid}"
+    token_info = st.session_state.get(token_key)
+    
+    if token_info and not auth_manager.is_token_expired(token_info):
+        return spotipy.Spotify(auth=token_info["access_token"])
+    
+    # Need fresh login
     login_url = auth_manager.get_authorize_url()
-    st.info("Please log in with Spotify")
-    st.markdown(f"[Log in with Spotify]({login_url})")
+    
+    st.warning("🔐 Fresh authentication required")
+    st.info("Each user must log in separately to prevent data mixing")
+    st.markdown(f"[🔐 Login with YOUR Spotify Account]({login_url})")
+    
+    # Show clear separation
+    st.markdown("---")
+    st.error("⚠️ DO NOT proceed until YOU have logged in with YOUR account")
     st.stop()
 
-@st.cache_data
-def load_trained_models():
-    """Load pre-trained personality prediction models"""
-    
-    model_files = {
-        'behavioral': 'models/behavioral_personality_models.pkl',
-        'research': 'models/research_personality_models.pkl',
-        'per': 'models/per_personality.pkl'
-    }
-    
-    loaded_models = {}
-    
-    for model_name, file_path in model_files.items():
-        try:
-            if os.path.exists(file_path):
-                model_data = joblib.load(file_path)
-                loaded_models[model_name] = model_data
-                st.sidebar.success(f"✅ Loaded {model_name} model")
-            else:
-                st.sidebar.warning(f"⚠️ {model_name} model not found at {file_path}")
-        except Exception as e:
-            st.sidebar.error(f"❌ Error loading {model_name} model: {e}")
-    
-    return loaded_models
-
-def get_user_music_data_debug(sp, limit=50):
-    """DEBUG: Get user's music data with detailed logging"""
-    
-    st.write("🐛 DEBUG: Starting music data collection...")
-    
-    # Get user info to differentiate users
+def get_user_profile_debug(sp):
+    """Get user profile to verify identity"""
     try:
-        user_info = sp.current_user()
-        user_id = user_info.get('id', 'unknown_user')
-        st.write(f"🐛 DEBUG: User ID: {user_id}")
-        st.session_state.debug_data['user_id'] = user_id
+        user_profile = sp.current_user()
+        user_id = user_profile.get('id', 'unknown')
+        display_name = user_profile.get('display_name', 'Unknown User')
+        followers = user_profile.get('followers', {}).get('total', 0)
+        
+        return {
+            'user_id': user_id,
+            'display_name': display_name,
+            'followers': followers,
+            'profile_url': user_profile.get('external_urls', {}).get('spotify', ''),
+            'country': user_profile.get('country', 'Unknown')
+        }
     except Exception as e:
-        st.write(f"🐛 DEBUG: Could not get user info: {e}")
-        user_id = "unknown_user"
+        st.error(f"🔐 Could not get user profile: {e}")
+        return None
+
+def get_user_music_data_isolated(sp, limit=20):
+    """Get user's music data with complete isolation"""
+    
+    # First, verify user identity
+    user_profile = get_user_profile_debug(sp)
+    if not user_profile:
+        return None
+    
+    st.success(f"🔐 Authenticated as: {user_profile['display_name']} ({user_profile['user_id']})")
     
     music_data = {
-        'user_id': user_id,
+        'session_id': st.session_state.session_uuid,
+        'user_profile': user_profile,
+        'collection_time': datetime.now().isoformat(),
         'tracks': [],
         'artists': [],
         'genres': [],
-        'track_names': [],
-        'artist_names': []
+        'raw_data': {}
     }
     
     try:
-        st.write("🐛 DEBUG: Fetching tracks from different time periods...")
+        st.write(f"🔐 Collecting data for {user_profile['display_name']}...")
         
         all_tracks = []
         
-        # Get tracks from multiple sources with detailed logging
+        # Get top tracks with detailed logging
         for time_range in ['short_term', 'medium_term', 'long_term']:
             try:
-                tracks = sp.current_user_top_tracks(limit=limit, time_range=time_range)
-                track_count = len(tracks['items'])
-                all_tracks.extend(tracks['items'])
+                st.write(f"  📊 Getting {time_range} tracks...")
+                tracks_response = sp.current_user_top_tracks(limit=limit, time_range=time_range)
+                tracks = tracks_response['items']
                 
-                # DEBUG: Show track names for verification
-                track_names = [track['name'] for track in tracks['items'][:3]]
-                st.write(f"🐛 DEBUG: {time_range} - {track_count} tracks. Sample: {track_names}")
-                
+                if tracks:
+                    all_tracks.extend(tracks)
+                    # Show proof of different data
+                    sample_tracks = [f"{t['name']} - {t['artists'][0]['name']}" for t in tracks[:3]]
+                    st.write(f"    Sample tracks: {sample_tracks}")
+                else:
+                    st.write(f"    No {time_range} tracks found")
+                    
             except Exception as e:
-                st.write(f"🐛 DEBUG: Error getting {time_range} tracks: {e}")
+                st.warning(f"  ❌ Error getting {time_range} tracks: {e}")
         
         # Get recent tracks
         try:
-            recent = sp.current_user_recently_played(limit=limit)
-            recent_tracks = [item['track'] for item in recent['items']]
-            recent_count = len(recent_tracks)
-            all_tracks.extend(recent_tracks)
+            st.write("  📊 Getting recently played...")
+            recent_response = sp.current_user_recently_played(limit=limit)
+            recent_tracks = [item['track'] for item in recent_response['items']]
             
-            # DEBUG: Show recent track names
-            recent_names = [track['name'] for track in recent_tracks[:3]]
-            st.write(f"🐛 DEBUG: Recent tracks - {recent_count} tracks. Sample: {recent_names}")
-            
+            if recent_tracks:
+                all_tracks.extend(recent_tracks)
+                sample_recent = [f"{t['name']} - {t['artists'][0]['name']}" for t in recent_tracks[:3]]
+                st.write(f"    Recent tracks: {sample_recent}")
+            else:
+                st.write("    No recent tracks found")
+                
         except Exception as e:
-            st.write(f"🐛 DEBUG: Error getting recent tracks: {e}")
+            st.warning(f"  ❌ Error getting recent tracks: {e}")
         
         if not all_tracks:
-            st.error("🐛 DEBUG: No tracks found!")
+            st.error("🔐 No tracks found for this user!")
             return None
         
-        # Remove duplicates and collect names for verification
+        # Remove duplicates
         seen_ids = set()
         unique_tracks = []
         for track in all_tracks:
@@ -170,16 +209,13 @@ def get_user_music_data_debug(sp, limit=50):
                 seen_ids.add(track['id'])
         
         music_data['tracks'] = unique_tracks
-        music_data['track_names'] = [track['name'] for track in unique_tracks]
-        music_data['artist_names'] = [track['artists'][0]['name'] for track in unique_tracks]
+        music_data['raw_data']['track_count'] = len(unique_tracks)
         
-        st.write(f"🐛 DEBUG: Found {len(unique_tracks)} unique tracks")
-        st.write(f"🐛 DEBUG: Sample track names: {music_data['track_names'][:5]}")
-        st.write(f"🐛 DEBUG: Sample artists: {music_data['artist_names'][:5]}")
+        st.success(f"🔐 Found {len(unique_tracks)} unique tracks for {user_profile['display_name']}")
         
-        # Get artist info for genres
-        artist_ids = list(set([track['artists'][0]['id'] for track in unique_tracks if track['artists']]))
-        st.write(f"🐛 DEBUG: Getting info for {len(artist_ids)} unique artists...")
+        # Get artist info
+        artist_ids = list(set([track['artists'][0]['id'] for track in unique_tracks]))
+        st.write(f"  📊 Getting artist data for {len(artist_ids)} artists...")
         
         all_artists = []
         all_genres = []
@@ -195,372 +231,208 @@ def get_user_music_data_debug(sp, limit=50):
                     artist_genres = artist.get('genres', [])
                     all_genres.extend(artist_genres)
                 
-                time.sleep(0.1)
+                time.sleep(0.1)  # Rate limiting
                 
             except Exception as e:
-                st.write(f"🐛 DEBUG: Error getting artist batch: {e}")
+                st.warning(f"  ❌ Error getting artist batch: {e}")
         
         music_data['artists'] = all_artists
         music_data['genres'] = all_genres
+        music_data['raw_data']['genre_count'] = len(all_genres)
+        music_data['raw_data']['unique_genres'] = len(set(all_genres))
         
-        st.write(f"🐛 DEBUG: Found {len(all_genres)} genre tags")
-        st.write(f"🐛 DEBUG: Sample genres: {list(set(all_genres))[:10]}")
+        # Show genre sample to prove different data
+        if all_genres:
+            unique_genres = list(set(all_genres))[:10]
+            st.write(f"  📊 Sample genres: {unique_genres}")
         
-        # Store in session state for comparison
-        st.session_state.debug_data['music_data'] = music_data
+        # Create a hash of the data to verify uniqueness
+        data_string = f"{user_profile['user_id']}_{len(unique_tracks)}_{len(all_genres)}_{'_'.join(sorted(set(all_genres)))}"
+        data_hash = hashlib.md5(data_string.encode()).hexdigest()[:8]
+        music_data['data_fingerprint'] = data_hash
+        
+        st.success(f"🔐 Data fingerprint: {data_hash}")
         
         return music_data
         
     except Exception as e:
-        st.error(f"🐛 DEBUG: Error in music data collection: {e}")
+        st.error(f"🔐 Error collecting music data: {e}")
         import traceback
         st.error(traceback.format_exc())
         return None
 
-def create_features_from_metadata_debug(music_data):
-    """DEBUG: Create features with detailed logging"""
+def analyze_user_data_isolated(music_data):
+    """Analyze user data with complete transparency"""
     
-    st.write("🐛 DEBUG: Starting feature extraction...")
-    
-    tracks = music_data['tracks']
-    genres = music_data['genres']
-    user_id = music_data.get('user_id', 'unknown')
-    
-    if not tracks:
-        st.error("🐛 DEBUG: No tracks to analyze!")
+    if not music_data or not music_data['tracks']:
+        st.error("🔐 No data to analyze!")
         return None
     
-    st.write(f"🐛 DEBUG: Processing {len(tracks)} tracks for user {user_id}")
+    user_profile = music_data['user_profile']
+    tracks = music_data['tracks']
+    genres = music_data['genres']
     
-    # Analyze track metadata with detailed logging
-    track_data = []
-    for track in tracks:
-        track_info = {
-            'name': track['name'],
-            'artist': track['artists'][0]['name'],
-            'popularity': track.get('popularity', 50),
-            'explicit': track.get('explicit', False),
-            'duration_ms': track.get('duration_ms', 180000)
-        }
-        track_data.append(track_info)
+    st.header(f"🔐 Analysis for {user_profile['display_name']}")
+    st.write(f"**User ID:** {user_profile['user_id']}")
+    st.write(f"**Data Fingerprint:** {music_data['data_fingerprint']}")
+    st.write(f"**Collection Time:** {music_data['collection_time']}")
     
-    track_df = pd.DataFrame(track_data)
+    # Basic stats
+    track_names = [track['name'] for track in tracks]
+    artist_names = [track['artists'][0]['name'] for track in tracks]
+    popularities = [track.get('popularity', 50) for track in tracks]
     
-    # DEBUG: Show actual values being calculated
-    st.write("🐛 DEBUG: Track statistics:")
-    st.write(f"  - Average popularity: {track_df['popularity'].mean():.2f}")
-    st.write(f"  - Explicit tracks: {track_df['explicit'].sum()}/{len(tracks)}")
-    st.write(f"  - Average duration: {track_df['duration_ms'].mean()/60000:.2f} minutes")
+    col1, col2, col3 = st.columns(3)
     
-    # Get enriched genre/tag data
-    all_genres = genres
-    genre_text = ' '.join(all_genres).lower()
-    
-    st.write(f"🐛 DEBUG: Genre analysis:")
-    st.write(f"  - Total genre mentions: {len(all_genres)}")
-    st.write(f"  - Unique genres: {len(set(all_genres))}")
-    st.write(f"  - Sample genres: {list(set(all_genres))[:5]}")
-    
-    # Create features with detailed calculation logging
-    features = {}
-    
-    # Basic popularity and mainstream metrics
-    popularity_mean = track_df['popularity'].mean() / 100
-    features['popularity'] = popularity_mean
-    features['mainstream_preference'] = (track_df['popularity'] > 70).mean()
-    features['underground_preference'] = (track_df['popularity'] < 30).mean()
-    features['explicit_content_ratio'] = track_df['explicit'].mean()
-    
-    st.write(f"🐛 DEBUG: Basic metrics calculated:")
-    st.write(f"  - Popularity: {features['popularity']:.3f}")
-    st.write(f"  - Mainstream: {features['mainstream_preference']:.3f}")
-    st.write(f"  - Underground: {features['underground_preference']:.3f}")
-    st.write(f"  - Explicit ratio: {features['explicit_content_ratio']:.3f}")
-    
-    # Duration preferences
-    avg_duration_min = track_df['duration_ms'].mean() / 60000
-    features['song_length_preference'] = min(1.0, avg_duration_min / 5)
-    features['short_song_preference'] = (track_df['duration_ms'] < 180000).mean()
-    features['long_song_preference'] = (track_df['duration_ms'] > 300000).mean()
-    
-    # Genre diversity
-    genre_diversity = len(set(all_genres)) / max(len(all_genres), 1) if all_genres else 0
-    features['genre_diversity'] = genre_diversity
-    features['unique_genres_count'] = len(set(all_genres))
-    
-    st.write(f"🐛 DEBUG: Genre diversity: {genre_diversity:.3f}")
-    
-    # Analyze genres for personality indicators with detailed logging
-    electronic_terms = ['electronic', 'dance', 'house', 'techno', 'edm', 'club', 'party']
-    electronic_count = sum(1 for term in electronic_terms if term in genre_text)
-    features['electronic_preference'] = electronic_count / max(len(all_genres), 1)
-    
-    rock_terms = ['rock', 'metal', 'punk', 'alternative', 'grunge', 'indie']
-    rock_count = sum(1 for term in rock_terms if term in genre_text)
-    features['rock_preference'] = rock_count / max(len(all_genres), 1)
-    
-    calm_terms = ['acoustic', 'folk', 'ambient', 'chill', 'soft', 'mellow', 'classical']
-    calm_count = sum(1 for term in calm_terms if term in genre_text)
-    features['calm_preference'] = calm_count / max(len(all_genres), 1)
-    
-    pop_terms = ['pop', 'mainstream', 'chart', 'radio']
-    pop_count = sum(1 for term in pop_terms if term in genre_text)
-    features['pop_preference'] = pop_count / max(len(all_genres), 1)
-    
-    st.write(f"🐛 DEBUG: Genre preferences:")
-    st.write(f"  - Electronic: {features['electronic_preference']:.3f} (found {electronic_count} matches)")
-    st.write(f"  - Rock: {features['rock_preference']:.3f} (found {rock_count} matches)")
-    st.write(f"  - Calm: {features['calm_preference']:.3f} (found {calm_count} matches)")
-    st.write(f"  - Pop: {features['pop_preference']:.3f} (found {pop_count} matches)")
-    
-    # Artist diversity
-    unique_artists = len(set([track['artists'][0]['name'] for track in tracks]))
-    features['artist_diversity'] = unique_artists / len(tracks)
-    
-    # Create personality indicators
-    features['energy_preference'] = (
-        features['electronic_preference'] * 0.4 +
-        features['rock_preference'] * 0.4 +
-        features['pop_preference'] * 0.2
-    )
-    
-    features['openness_indicators'] = (
-        features['genre_diversity'] * 0.4 +
-        features['underground_preference'] * 0.3 +
-        features['artist_diversity'] * 0.3
-    )
-    
-    features['conscientiousness_indicators'] = (
-        features['mainstream_preference'] * 0.5 +
-        features['pop_preference'] * 0.3 +
-        (1 - features['explicit_content_ratio']) * 0.2
-    )
-    
-    st.write(f"🐛 DEBUG: Personality indicators:")
-    st.write(f"  - Energy: {features['energy_preference']:.3f}")
-    st.write(f"  - Openness: {features['openness_indicators']:.3f}")
-    st.write(f"  - Conscientiousness: {features['conscientiousness_indicators']:.3f}")
-    
-    # Ensure all values are in [0, 1] range and handle edge cases
-    for key, value in features.items():
-        if hasattr(value, 'item'):
-            value = value.item()
-        elif hasattr(value, '__len__') and not isinstance(value, str):
-            value = float(value.mean() if hasattr(value, 'mean') else value[0])
+    with col1:
+        st.metric("Tracks Analyzed", len(tracks))
+        st.metric("Unique Artists", len(set(artist_names)))
         
-        if pd.isna(value) or value is None:
-            st.write(f"🐛 DEBUG: {key} was NaN/None, setting to 0.5")
-            features[key] = 0.5
-        else:
-            features[key] = max(0.0, min(1.0, float(value)))
+    with col2:
+        st.metric("Total Genres", len(genres))
+        st.metric("Unique Genres", len(set(genres)))
+        
+    with col3:
+        avg_popularity = np.mean(popularities)
+        st.metric("Avg Popularity", f"{avg_popularity:.1f}")
+        st.metric("Mainstream %", f"{(avg_popularity > 70) * 100:.0f}%")
     
-    # Store features for comparison
-    st.session_state.debug_data['features'] = features
-    st.session_state.debug_data['feature_summary'] = {
-        'user_id': user_id,
-        'track_count': len(tracks),
-        'unique_artists': unique_artists,
-        'genre_count': len(all_genres),
-        'unique_genres': len(set(all_genres)),
-        'avg_popularity': track_df['popularity'].mean(),
-        'key_features': {
-            'energy_preference': features['energy_preference'],
-            'openness_indicators': features['openness_indicators'],
-            'mainstream_preference': features['mainstream_preference']
-        }
+    # Show actual track data to prove uniqueness
+    st.subheader("📊 Your Top Tracks")
+    track_display = pd.DataFrame({
+        'Track': track_names[:10],
+        'Artist': artist_names[:10],
+        'Popularity': popularities[:10]
+    })
+    st.dataframe(track_display)
+    
+    # Show genre distribution
+    if genres:
+        st.subheader("📊 Your Genres")
+        genre_counts = pd.Series(genres).value_counts().head(10)
+        st.bar_chart(genre_counts)
+    
+    # Calculate some basic features for demonstration
+    features = {
+        'avg_popularity': avg_popularity / 100,
+        'mainstream_preference': sum(1 for p in popularities if p > 70) / len(popularities),
+        'underground_preference': sum(1 for p in popularities if p < 30) / len(popularities),
+        'genre_diversity': len(set(genres)) / max(len(genres), 1) if genres else 0,
+        'unique_artist_ratio': len(set(artist_names)) / len(tracks)
     }
     
-    st.write(f"🐛 DEBUG: Final feature count: {len(features)}")
-    st.write(f"🐛 DEBUG: Feature keys: {list(features.keys())}")
+    st.subheader("📊 Your Music Features")
+    features_df = pd.DataFrame([features]).T
+    features_df.columns = ['Value']
+    st.dataframe(features_df)
+    
+    # Store results with session isolation
+    results_key = f"results_{st.session_state.session_uuid}"
+    st.session_state[results_key] = {
+        'user_id': user_profile['user_id'],
+        'display_name': user_profile['display_name'],
+        'features': features,
+        'data_fingerprint': music_data['data_fingerprint'],
+        'analysis_time': datetime.now().isoformat()
+    }
     
     return features
 
-def predict_personality_debug(features, loaded_models):
-    """DEBUG: Predict personality with detailed logging"""
+def compare_sessions():
+    """Show comparison between different sessions to verify isolation"""
     
-    st.write("🐛 DEBUG: Starting personality prediction...")
+    st.header("🔐 Session Isolation Verification")
     
-    if not features:
-        st.error("🐛 DEBUG: No features provided!")
-        return None, None
+    # Find all result sessions
+    result_sessions = {}
+    for key in st.session_state.keys():
+        if key.startswith('results_'):
+            session_id = key.replace('results_', '')
+            result_sessions[session_id] = st.session_state[key]
     
-    st.write(f"🐛 DEBUG: Input features count: {len(features)}")
-    st.write(f"🐛 DEBUG: Sample features: {dict(list(features.items())[:5])}")
-    
-    # Try models in order with detailed error reporting
-    for model_name in ['behavioral', 'research', 'per']:
-        if model_name in loaded_models:
-            st.write(f"🐛 DEBUG: Trying {model_name} model...")
+    if len(result_sessions) > 1:
+        st.success(f"✅ Found {len(result_sessions)} different user sessions")
+        
+        comparison_data = []
+        for session_id, results in result_sessions.items():
+            comparison_data.append({
+                'Session': session_id[:8],
+                'User': results['display_name'],
+                'User ID': results['user_id'],
+                'Data Fingerprint': results['data_fingerprint'],
+                'Mainstream Pref': f"{results['features']['mainstream_preference']:.2f}",
+                'Genre Diversity': f"{results['features']['genre_diversity']:.2f}"
+            })
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df)
+        
+        # Check for identical results (this should NOT happen)
+        fingerprints = [r['data_fingerprint'] for r in result_sessions.values()]
+        if len(set(fingerprints)) == 1:
+            st.error("🚨 CRITICAL: All users have identical data fingerprints!")
+        else:
+            st.success("✅ Users have different data fingerprints - isolation working!")
             
-            try:
-                model_data = loaded_models[model_name]
-                
-                if model_name == 'behavioral':
-                    # Check feature count mismatch
-                    expected_features = model_data.get('feature_lists', {})
-                    if expected_features:
-                        first_trait = list(expected_features.keys())[0]
-                        expected_count = len(expected_features[first_trait])
-                        st.write(f"🐛 DEBUG: Behavioral model expects {expected_count} features, we have {len(features)}")
-                
-                elif model_name == 'research':
-                    # Try research model
-                    models = model_data.get('models', {})
-                    scalers = model_data.get('scalers', {})
-                    feature_cols = model_data.get('feature_cols', [])
-                    
-                    st.write(f"🐛 DEBUG: Research model has {len(models)} trait models")
-                    st.write(f"🐛 DEBUG: Expected feature columns: {feature_cols}")
-                    
-                    if not models:
-                        st.write("🐛 DEBUG: No models found in research data")
-                        continue
-                    
-                    # Create feature vector
-                    feature_vector = []
-                    missing_features = []
-                    
-                    for col in feature_cols:
-                        if col in features:
-                            feature_vector.append(features[col])
-                        else:
-                            feature_vector.append(0.5)  # Default
-                            missing_features.append(col)
-                    
-                    if missing_features:
-                        st.write(f"🐛 DEBUG: Missing features (using defaults): {missing_features}")
-                    
-                    feature_array = np.array(feature_vector).reshape(1, -1)
-                    st.write(f"🐛 DEBUG: Feature array shape: {feature_array.shape}")
-                    st.write(f"🐛 DEBUG: Feature array sample: {feature_array[0][:5]}")
-                    
-                    predictions = {}
-                    confidence = {}
-                    
-                    for trait in models:
-                        try:
-                            scaler = scalers.get(trait)
-                            if scaler:
-                                scaled_features = scaler.transform(feature_array)
-                                st.write(f"🐛 DEBUG: {trait} - scaled features sample: {scaled_features[0][:3]}")
-                            else:
-                                scaled_features = feature_array
-                                st.write(f"🐛 DEBUG: {trait} - no scaler, using raw features")
-                            
-                            prediction = models[trait].predict(scaled_features)[0]
-                            clipped_prediction = np.clip(prediction, 1.0, 5.0)
-                            predictions[trait] = round(clipped_prediction, 2)
-                            confidence[trait] = 0.7
-                            
-                            st.write(f"🐛 DEBUG: {trait} prediction: {prediction:.3f} -> {clipped_prediction:.2f}")
-                            
-                        except Exception as e:
-                            st.write(f"🐛 DEBUG: Error predicting {trait}: {e}")
-                            predictions[trait] = 3.0
-                            confidence[trait] = 0.1
-                    
-                    if predictions:
-                        st.write(f"🐛 DEBUG: Final predictions: {predictions}")
-                        st.session_state.debug_data['predictions'] = predictions
-                        st.session_state.debug_data['model_used'] = model_name
-                        return predictions, confidence
-                
-            except Exception as e:
-                st.write(f"🐛 DEBUG: Error with {model_name} model: {e}")
-                import traceback
-                st.write(f"🐛 DEBUG: Traceback: {traceback.format_exc()}")
-                continue
-    
-    # Fallback prediction
-    st.write("🐛 DEBUG: Using fallback prediction...")
-    fallback_predictions = {
-        'Extraversion': 3.0,
-        'Openness': 3.0,
-        'Conscientiousness': 3.0,
-        'Agreeableness': 3.0,
-        'Neuroticism': 3.0
-    }
-    
-    st.session_state.debug_data['predictions'] = fallback_predictions
-    st.session_state.debug_data['model_used'] = 'fallback'
-    
-    return fallback_predictions, {'Extraversion': 0.1, 'Openness': 0.1, 'Conscientiousness': 0.1, 'Agreeableness': 0.1, 'Neuroticism': 0.1}
+    else:
+        st.info("Only one user session found so far")
 
 def main():
-    st.title("🐛 Spotify Personality Predictor - DEBUG VERSION")
-    st.markdown("### Debug mode to identify why all users get identical results")
+    st.title("🔐 Spotify Debug - User Data Isolation Test")
+    st.markdown("### Ensuring each user sees only their own data")
     
-    # Load models
-    loaded_models = load_trained_models()
+    # Force clear caches on app start
+    if st.button("🔄 Clear All Caches & Reset"):
+        clear_all_caches()
+        # Clear all session state except UUID
+        keys_to_keep = ['session_uuid', 'session_start']
+        for key in list(st.session_state.keys()):
+            if key not in keys_to_keep:
+                del st.session_state[key]
+        st.rerun()
     
-    # Authentication
+    # Show session isolation info
+    with st.sidebar:
+        st.header("🔐 Session Info")
+        st.write(f"Session: {st.session_state.session_uuid[:8]}...")
+        st.write(f"Started: {st.session_state.session_start}")
+        
+        # Show how many sessions we've seen
+        session_count = len([k for k in st.session_state.keys() if k.startswith('results_')])
+        st.write(f"Sessions analyzed: {session_count}")
+    
+    # Authentication with forced isolation
     sp = ensure_spotify_client()
-    st.success("Connected to Spotify")
     
-    # Show debug data from previous sessions
-    if st.session_state.debug_data:
-        with st.expander("🐛 Previous Session Data"):
-            st.json(st.session_state.debug_data)
-    
-    if st.button("🐛 DEBUG: Analyze My Musical Personality", type="primary"):
+    if st.button("🔐 Analyze MY Music Data", type="primary"):
         
-        # Clear previous debug data
-        st.session_state.debug_data = {}
+        with st.spinner("🔐 Collecting YOUR music data (isolated)..."):
+            music_data = get_user_music_data_isolated(sp)
         
-        with st.spinner("🐛 DEBUG: Collecting music data..."):
-            music_data = get_user_music_data_debug(sp)
-        
-        if music_data and music_data['tracks']:
-            
-            with st.spinner("🐛 DEBUG: Extracting features..."):
-                features = create_features_from_metadata_debug(music_data)
+        if music_data:
+            with st.spinner("🔐 Analyzing YOUR data..."):
+                features = analyze_user_data_isolated(music_data)
             
             if features:
-                with st.spinner("🐛 DEBUG: Predicting personality..."):
-                    predictions, confidence = predict_personality_debug(features, loaded_models)
+                st.success("🔐 Analysis complete!")
                 
-                if predictions:
-                    # Show debug summary
-                    st.header("🐛 DEBUG SUMMARY")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("User Data")
-                        st.write(f"User ID: {music_data.get('user_id', 'unknown')}")
-                        st.write(f"Tracks: {len(music_data['tracks'])}")
-                        st.write(f"Artists: {len(set(music_data['artist_names']))}")
-                        st.write(f"Genres: {len(music_data['genres'])}")
-                        
-                    with col2:
-                        st.subheader("Key Features")
-                        if 'feature_summary' in st.session_state.debug_data:
-                            summary = st.session_state.debug_data['feature_summary']
-                            for key, value in summary['key_features'].items():
-                                st.write(f"{key}: {value:.3f}")
-                    
-                    # Show predictions
-                    st.header("Personality Results")
-                    
-                    for trait, score in predictions.items():
-                        conf = confidence.get(trait, 0.5)
-                        st.metric(trait, f"{score:.1f}/5.0", f"Confidence: {conf:.0%}")
-                    
-                    # Show all extracted features for debugging
-                    with st.expander("🐛 All Extracted Features"):
-                        features_df = pd.DataFrame([features]).T
-                        features_df.columns = ['Value']
-                        st.dataframe(features_df)
-                    
-                    # Compare with previous users
-                    st.header("🐛 User Comparison")
-                    st.write("Compare this analysis with previous users to identify if results are identical")
-                    
-                    if 'debug_data' in st.session_state:
-                        st.json(st.session_state.debug_data)
-        
+                # Show session comparison if multiple users
+                compare_sessions()
         else:
-            st.error("🐛 DEBUG: Could not get music data")
+            st.error("🔐 Failed to collect music data")
+    
+    # Show instructions
+    st.markdown("---")
+    st.subheader("🔐 Testing Instructions")
+    st.markdown("""
+    1. **First User**: Click "Analyze MY Music Data" and login
+    2. **Second User**: In a NEW browser tab/window, visit this same URL
+    3. **Second User**: Click "Analyze MY Music Data" and login with DIFFERENT account
+    4. **Compare**: Both users should see different data and fingerprints
+    
+    **Expected Result**: Each user sees only their own Spotify data
+    **Bug Indicator**: If data fingerprints are identical, there's still cross-contamination
+    """)
 
 if __name__ == "__main__":
     main()
