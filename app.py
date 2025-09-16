@@ -147,74 +147,152 @@ def load_trained_models():
     
     return loaded_models
 
-def create_model_features_from_spotify_data(music_data):
-    """Create features that match what the trained models expect"""
+def create_features_from_metadata(music_data):
+    """Create personality features from track metadata and enriched data"""
     
-    audio_features = music_data['audio_features']
-    genres = music_data['genres']
     tracks = music_data['tracks']
+    genres = music_data['genres']
+    enriched_data = music_data.get('enriched_data', {})
     
-    if not audio_features:
+    if not tracks:
         return None
     
-    df = pd.DataFrame(audio_features)
+    # Analyze track metadata
+    track_df = pd.DataFrame([{
+        'name': track['name'],
+        'artist': track['artists'][0]['name'],
+        'popularity': track.get('popularity', 50),
+        'explicit': track.get('explicit', False),
+        'duration_ms': track.get('duration_ms', 180000)
+    } for track in tracks])
     
-    # Create features that match the behavioral model training
-    features = {
-        # Basic audio features (matching training data)
-        'energy_preference': df['energy'].mean(),
-        'social_music_score': (df['valence'] + df['danceability']).mean() / 2,
-        'high_energy_preference': (df['energy'] > 0.7).astype(int).mean(),
-        'danceable_preference': df['danceability'].mean(),
-        'loudness_preference': (df['loudness'] + 60) / 60,  # Normalize to 0-1
-        'tempo_preference': df['tempo'].mean() / 200,  # Normalize
-        
-        # Openness features
-        'musical_complexity': (df['acousticness'] + df['instrumentalness']).mean() / 2,
-        'experimental_preference': df['instrumentalness'].mean(),
-        'acoustic_exploration': df['acousticness'].mean(),
-        'instrumental_preference': df['instrumentalness'].mean(),
-        'genre_openness': len(set(genres)) / max(len(genres), 1),
-        'unconventional_preference': 1 - (df['popularity'].mean() / 100),
-        
-        # Conscientiousness features
-        'listening_consistency': 1 - df['valence'].std() if len(df) > 1 else 0.8,
-        'routine_preference': df['popularity'].mean() / 100,
-        'completion_tendency': df['energy'].mean(),  # Proxy for not skipping
-        'organized_listening': (df['popularity'] > 50).mean(),
-        'mainstream_preference': (df['popularity'] > 70).mean(),
-        'predictable_choice': 1 - df['energy'].std() if len(df) > 1 else 0.8,
-        
-        # Agreeableness features
-        'positive_music_preference': df['valence'].mean(),
-        'mellow_preference': 1 - df['energy'].mean(),
-        'harmony_seeking': df['valence'].mean(),
-        'avoid_aggressive': 1 - (df['energy'] * (1 - df['valence'])).mean(),
-        'social_acceptance': (df['valence'] + df['danceability']).mean() / 2,
-        'cooperative_music': df['acousticness'].mean(),
-        
-        # Neuroticism features
-        'emotional_music_seeking': 1 - df['valence'].mean(),
-        'mood_instability': df['valence'].std() if len(df) > 1 else 0.1,
-        'anxiety_music': ((1 - df['valence']) * df['energy']).mean(),
-        'comfort_seeking': df['acousticness'].mean(),
-        'emotional_volatility': df['energy'].std() if len(df) > 1 else 0.1,
-        'stress_response': (1 - df['valence']).mean(),
-        
-        # General features
-        'music_sophistication': (df['acousticness'] + df['instrumentalness']).mean() / 2,
-        'emotional_regulation': df['valence'].mean(),
-        'stimulation_seeking': df['energy'].mean(),
-        'mood_management': df['valence'].mean(),
-        'musical_engagement': df['danceability'].mean(),
-    }
+    # Get enriched genre/tag data
+    all_genres = genres + enriched_data.get('genres_enriched', [])
+    artist_tags = enriched_data.get('artist_tags', {})
+    artist_popularity = enriched_data.get('artist_popularity', {})
+    
+    # Create features based on metadata analysis
+    features = {}
+    
+    # Basic popularity and mainstream metrics
+    features['popularity'] = track_df['popularity'].mean() / 100
+    features['mainstream_preference'] = (track_df['popularity'] > 70).mean()
+    features['underground_preference'] = (track_df['popularity'] < 30).mean()
+    features['explicit_content_ratio'] = track_df['explicit'].mean()
+    
+    # Duration preferences (normalized)
+    avg_duration_min = track_df['duration_ms'].mean() / 60000
+    features['song_length_preference'] = min(1.0, avg_duration_min / 5)  # Normalize to 0-1
+    features['short_song_preference'] = (track_df['duration_ms'] < 180000).mean()  # < 3 min
+    features['long_song_preference'] = (track_df['duration_ms'] > 300000).mean()   # > 5 min
+    
+    # Genre and style analysis
+    features['genre_diversity'] = len(set(all_genres)) / max(len(all_genres), 1)
+    features['unique_genres_count'] = len(set(all_genres))
+    
+    # Analyze genres for personality indicators
+    genre_text = ' '.join(all_genres).lower()
+    
+    # Electronic/Dance music (Extraversion)
+    electronic_terms = ['electronic', 'dance', 'house', 'techno', 'edm', 'club', 'party']
+    features['electronic_preference'] = sum(1 for term in electronic_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Rock/Metal (Energy/Openness)
+    rock_terms = ['rock', 'metal', 'punk', 'alternative', 'grunge', 'indie']
+    features['rock_preference'] = sum(1 for term in rock_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Calm/Acoustic (Agreeableness/Neuroticism-)
+    calm_terms = ['acoustic', 'folk', 'ambient', 'chill', 'soft', 'mellow', 'classical']
+    features['calm_preference'] = sum(1 for term in calm_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Hip-hop/Rap (Social/Extraversion)
+    hiphop_terms = ['hip hop', 'rap', 'hip-hop', 'trap', 'drill']
+    features['hiphop_preference'] = sum(1 for term in hiphop_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Pop (Mainstream/Agreeableness)
+    pop_terms = ['pop', 'mainstream', 'chart', 'radio']
+    features['pop_preference'] = sum(1 for term in pop_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Experimental/Avant-garde (Openness)
+    experimental_terms = ['experimental', 'avant-garde', 'progressive', 'art', 'weird', 'unusual']
+    features['experimental_preference'] = sum(1 for term in experimental_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Artist diversity
+    unique_artists = len(set([track['artists'][0]['name'] for track in tracks]))
+    features['artist_diversity'] = unique_artists / len(tracks)
+    
+    # Use Last.fm data if available
+    if artist_popularity:
+        avg_artist_popularity = np.mean(list(artist_popularity.values()))
+        features['artist_mainstream_score'] = min(1.0, avg_artist_popularity / 1000000)  # Normalize
+    else:
+        features['artist_mainstream_score'] = features['popularity']
+    
+    # Create estimated audio-like features from metadata
+    # These are educated guesses based on genre and popularity
+    features['energy_preference'] = (
+        features['electronic_preference'] * 0.4 +
+        features['rock_preference'] * 0.4 +
+        features['hiphop_preference'] * 0.2
+    )
+    
+    features['danceability_preference'] = (
+        features['electronic_preference'] * 0.5 +
+        features['pop_preference'] * 0.3 +
+        features['hiphop_preference'] * 0.2
+    )
+    
+    features['valence_preference'] = (
+        features['pop_preference'] * 0.4 +
+        features['electronic_preference'] * 0.3 +
+        (1 - features['explicit_content_ratio']) * 0.3
+    )
+    
+    features['acousticness_preference'] = features['calm_preference']
+    
+    features['musical_sophistication'] = (
+        features['experimental_preference'] * 0.4 +
+        features['genre_diversity'] * 0.3 +
+        features['artist_diversity'] * 0.3
+    )
+    
+    # Personality-relevant behavioral features
+    features['social_music_score'] = (
+        features['pop_preference'] * 0.3 +
+        features['electronic_preference'] * 0.3 +
+        features['mainstream_preference'] * 0.4
+    )
+    
+    features['openness_indicators'] = (
+        features['experimental_preference'] * 0.3 +
+        features['genre_diversity'] * 0.3 +
+        features['underground_preference'] * 0.2 +
+        features['artist_diversity'] * 0.2
+    )
+    
+    features['conscientiousness_indicators'] = (
+        features['mainstream_preference'] * 0.4 +
+        features['pop_preference'] * 0.3 +
+        (1 - features['explicit_content_ratio']) * 0.3
+    )
+    
+    features['agreeableness_indicators'] = (
+        features['pop_preference'] * 0.3 +
+        features['calm_preference'] * 0.3 +
+        (1 - features['explicit_content_ratio']) * 0.4
+    )
+    
+    features['neuroticism_indicators'] = (
+        features['explicit_content_ratio'] * 0.3 +
+        (1 - features['valence_preference']) * 0.4 +
+        features['underground_preference'] * 0.3
+    )
     
     # Ensure all values are in [0, 1] range
     for key, value in features.items():
-        # Handle pandas Series or numpy arrays
-        if hasattr(value, 'item'):  # pandas Series or numpy scalar
-            value = value.item() if hasattr(value, 'item') else float(value)
-        elif hasattr(value, '__len__') and not isinstance(value, str):  # Handle arrays/series
+        if hasattr(value, 'item'):
+            value = value.item()
+        elif hasattr(value, '__len__') and not isinstance(value, str):
             value = float(value.mean() if hasattr(value, 'mean') else value[0])
         
         if pd.isna(value) or value is None:
@@ -285,16 +363,15 @@ def enrich_with_musicbrainz(artist_name):
     return []
 
 # -----------------------------------------------------------------------------
-# Music Data Collection with Proper User Isolation
+# Music Data Collection with Proper User Isolation (Metadata Only)
 # -----------------------------------------------------------------------------
-def get_user_music_data(sp, limit=50):
-    """Get user's music data with proper isolation"""
+def get_user_music_data_simplified(sp, limit=50):
+    """Get user's music data focusing on track metadata instead of audio features"""
     
     music_data = {
         'tracks': [],
         'artists': [],
         'genres': [],
-        'audio_features': [],
         'enriched_data': {}
     }
     
@@ -336,30 +413,7 @@ def get_user_music_data(sp, limit=50):
         music_data['tracks'] = unique_tracks
         st.success(f"📊 Found {len(unique_tracks)} unique tracks")
         
-        # Get audio features
-        if unique_tracks:
-            try:
-                track_ids = [track['id'] for track in unique_tracks]
-                audio_features = []
-                
-                # Process in batches to avoid rate limits
-                batch_size = 50
-                for i in range(0, len(track_ids), batch_size):
-                    batch_ids = track_ids[i:i+batch_size]
-                    try:
-                        features = sp.audio_features(batch_ids)
-                        audio_features.extend([f for f in features if f is not None])
-                        time.sleep(0.1)  # Rate limiting
-                    except Exception as e:
-                        st.warning(f"Could not get audio features for batch {i//batch_size + 1}: {e}")
-                
-                music_data['audio_features'] = audio_features
-                st.write(f"🎵 Got audio features for {len(audio_features)} tracks")
-                
-            except Exception as e:
-                st.warning(f"Could not get audio features: {e}")
-        
-        # Get artist info for genres
+        # Get artist info for genres (this usually works)
         artists_info = get_artist_info_robust(sp, unique_tracks)
         music_data['artists'] = artists_info['artists']
         music_data['genres'] = artists_info['genres']
