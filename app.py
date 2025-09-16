@@ -1,4 +1,4 @@
-# app.py - USER ISOLATION VERIFICATION TEST
+# app.py - Clean Spotify Personality Predictor with Proper Authentication
 import os
 import time
 import streamlit as st
@@ -8,406 +8,681 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import hashlib
-import json
+import uuid
 from datetime import datetime
+import random
 
-# Spotify credentials
-SCOPES = (
-    "user-top-read "
-    "playlist-read-private "
-    "user-library-read "
-    "user-follow-read "
-    "user-read-recently-played"
-)
+# Configuration
+SCOPES = "user-top-read user-library-read user-read-recently-played user-follow-read playlist-read-private"
 
 CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
+CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET") 
 REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")
 
 st.set_page_config(
-    page_title="Spotify Isolation Test",
-    page_icon="✅",
+    page_title="Spotify Personality Predictor",
+    page_icon="🎵",
     layout="wide"
 )
 
-if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
-    st.error("Missing Spotify credentials")
+# Validate credentials
+if not all([CLIENT_ID, CLIENT_SECRET, REDIRECT_URI]):
+    st.error("Missing Spotify API credentials. Please set SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, and SPOTIPY_REDIRECT_URI environment variables.")
     st.stop()
 
-def get_auth_manager():
+def clear_authentication_state():
+    """Clear all authentication-related session state"""
+    keys_to_clear = [k for k in st.session_state.keys() if 'token' in k.lower() or 'auth' in k.lower()]
+    for key in keys_to_clear:
+        del st.session_state[key]
+
+def get_unique_session_id():
+    """Generate or retrieve unique session identifier"""
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    return st.session_state.session_id
+
+def create_spotify_auth_manager():
+    """Create Spotify OAuth manager with unique state"""
+    session_id = get_unique_session_id()
+    unique_state = f"spotify_auth_{session_id}_{int(time.time())}"
+    
     return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
         scope=SCOPES,
-        open_browser=False,
         cache_path=None,
-        show_dialog=True
+        state=unique_state,
+        show_dialog=True  # Force login dialog
     )
 
-def ensure_spotify_client():
-    auth_manager = get_auth_manager()
-    token_info = st.session_state.get("token_info")
-
-    if token_info and not auth_manager.is_token_expired(token_info):
-        return spotipy.Spotify(auth=token_info["access_token"])
-
+def authenticate_spotify():
+    """Handle Spotify authentication flow"""
+    auth_manager = create_spotify_auth_manager()
+    
+    # Check for authorization code in URL
     params = st.query_params
+    
     if "code" in params:
         code = params["code"]
-        token_info = auth_manager.get_access_token(code, as_dict=True)
-        st.session_state["token_info"] = token_info
-        st.query_params.clear()
-        st.rerun()
-
-    login_url = auth_manager.get_authorize_url()
-    st.info("Please log in with Spotify")
-    st.markdown(f"[Log in with Spotify]({login_url})")
-    st.stop()
-
-def get_comprehensive_user_data(sp):
-    """Get comprehensive user data to verify uniqueness"""
+        received_state = params.get("state", "")
+        
+        # Verify state parameter
+        session_id = get_unique_session_id()
+        if not received_state.startswith(f"spotify_auth_{session_id}"):
+            st.error("Authentication state mismatch. Please try logging in again.")
+            st.query_params.clear()
+            st.rerun()
+        
+        try:
+            # Exchange code for token
+            token_info = auth_manager.get_access_token(code, as_dict=True)
+            
+            if token_info and 'access_token' in token_info:
+                # Store token with session-specific key
+                token_key = f"spotify_token_{session_id}"
+                st.session_state[token_key] = token_info
+                
+                # Clear URL parameters
+                st.query_params.clear()
+                st.success("Successfully authenticated with Spotify!")
+                st.rerun()
+            else:
+                st.error("Failed to obtain access token")
+                return None
+                
+        except Exception as e:
+            st.error(f"Authentication error: {e}")
+            return None
     
+    # Check for existing valid token
+    session_id = get_unique_session_id()
+    token_key = f"spotify_token_{session_id}"
+    token_info = st.session_state.get(token_key)
+    
+    if token_info and not auth_manager.is_token_expired(token_info):
+        return spotipy.Spotify(auth=token_info["access_token"])
+    
+    # Need fresh authentication
+    auth_url = auth_manager.get_authorize_url()
+    
+    st.warning("Please authenticate with your Spotify account")
+    st.markdown(f"[Login with Spotify]({auth_url})")
+    
+    with st.expander("Authentication Debug Info"):
+        st.write(f"Session ID: {get_unique_session_id()}")
+        st.write(f"Expected state prefix: spotify_auth_{get_unique_session_id()}")
+        
+        if st.button("Clear Authentication State"):
+            clear_authentication_state()
+            st.rerun()
+    
+    return None
+
+def verify_user_identity(sp):
+    """Verify and display current user identity"""
     try:
-        # Get user profile first
         user_profile = sp.current_user()
-        user_id = user_profile.get('id', 'unknown')
-        display_name = user_profile.get('display_name', 'Unknown')
         
-        st.success(f"✅ Authenticated as: {display_name} ({user_id})")
-        
-        # Initialize data structure
-        user_data = {
-            'user_profile': {
-                'id': user_id,
-                'display_name': display_name,
-                'followers': user_profile.get('followers', {}).get('total', 0),
-                'country': user_profile.get('country', 'Unknown')
-            },
-            'top_tracks': {'short': [], 'medium': [], 'long': []},
-            'top_artists': {'short': [], 'medium': [], 'long': []},
-            'recent_tracks': [],
-            'saved_tracks': [],
-            'playlists': [],
-            'following': [],
-            'collection_timestamp': datetime.now().isoformat()
+        user_info = {
+            'id': user_profile.get('id', 'unknown'),
+            'display_name': user_profile.get('display_name', 'Unknown'),
+            'email': user_profile.get('email', 'Not provided'),
+            'country': user_profile.get('country', 'Unknown'),
+            'followers': user_profile.get('followers', {}).get('total', 0),
+            'product': user_profile.get('product', 'Unknown'),
+            'external_urls': user_profile.get('external_urls', {}).get('spotify', '')
         }
         
-        st.write("📊 Collecting comprehensive data...")
+        st.success(f"Authenticated as: {user_info['display_name']} ({user_info['id']})")
         
-        # Get top tracks across all time ranges
+        return user_info
+        
+    except Exception as e:
+        st.error(f"Failed to verify user identity: {e}")
+        return None
+
+def collect_spotify_data(sp, user_info, limit=50):
+    """Collect comprehensive Spotify data for analysis"""
+    
+    st.write("Collecting your Spotify data...")
+    
+    data = {
+        'user_info': user_info,
+        'collection_time': datetime.now().isoformat(),
+        'session_id': get_unique_session_id(),
+        'tracks': [],
+        'artists': [],
+        'audio_features': [],
+        'genres': [],
+        'playlists': [],
+        'following': [],
+        'recent_tracks': []
+    }
+    
+    # Collect data with error handling
+    try:
+        # Top tracks across different time ranges
+        all_tracks = []
         for time_range in ['short_term', 'medium_term', 'long_term']:
             try:
-                tracks = sp.current_user_top_tracks(limit=20, time_range=time_range)
-                user_data['top_tracks'][time_range.split('_')[0]] = tracks['items']
-                st.write(f"  ✅ {time_range} tracks: {len(tracks['items'])}")
+                response = sp.current_user_top_tracks(limit=limit//3, time_range=time_range)
+                tracks = response.get('items', [])
+                all_tracks.extend(tracks)
+                st.write(f"Collected {len(tracks)} {time_range} top tracks")
             except Exception as e:
-                st.write(f"  ❌ {time_range} tracks error: {e}")
+                st.warning(f"Could not get {time_range} tracks: {e}")
         
-        # Get top artists across all time ranges
-        for time_range in ['short_term', 'medium_term', 'long_term']:
+        # Recently played tracks
+        try:
+            response = sp.current_user_recently_played(limit=limit)
+            recent_items = response.get('items', [])
+            recent_tracks = [item['track'] for item in recent_items if item.get('track')]
+            all_tracks.extend(recent_tracks)
+            data['recent_tracks'] = recent_tracks
+            st.write(f"Collected {len(recent_tracks)} recently played tracks")
+        except Exception as e:
+            st.warning(f"Could not get recent tracks: {e}")
+        
+        # Remove duplicates
+        seen_ids = set()
+        unique_tracks = []
+        for track in all_tracks:
+            if track and track.get('id') and track['id'] not in seen_ids:
+                unique_tracks.append(track)
+                seen_ids.add(track['id'])
+        
+        data['tracks'] = unique_tracks
+        st.success(f"Found {len(unique_tracks)} unique tracks")
+        
+        # Get audio features for tracks
+        if unique_tracks:
             try:
-                artists = sp.current_user_top_artists(limit=20, time_range=time_range)
-                user_data['top_artists'][time_range.split('_')[0]] = artists['items']
-                st.write(f"  ✅ {time_range} artists: {len(artists['items'])}")
+                track_ids = [track['id'] for track in unique_tracks if track.get('id')]
+                
+                # Process in batches to avoid rate limits
+                audio_features = []
+                batch_size = 50
+                
+                for i in range(0, len(track_ids), batch_size):
+                    batch_ids = track_ids[i:i+batch_size]
+                    try:
+                        features = sp.audio_features(batch_ids)
+                        audio_features.extend([f for f in features if f is not None])
+                        time.sleep(0.1)  # Rate limiting
+                    except Exception as e:
+                        st.warning(f"Could not get audio features for batch {i//batch_size + 1}: {e}")
+                
+                data['audio_features'] = audio_features
+                st.write(f"Collected audio features for {len(audio_features)} tracks")
+                
             except Exception as e:
-                st.write(f"  ❌ {time_range} artists error: {e}")
+                st.warning(f"Could not get audio features: {e}")
         
-        # Get recently played
-        try:
-            recent = sp.current_user_recently_played(limit=50)
-            user_data['recent_tracks'] = [item['track'] for item in recent['items']]
-            st.write(f"  ✅ Recent tracks: {len(user_data['recent_tracks'])}")
-        except Exception as e:
-            st.write(f"  ❌ Recent tracks error: {e}")
+        # Get artist information and genres
+        if unique_tracks:
+            try:
+                artist_ids = list(set([track['artists'][0]['id'] for track in unique_tracks if track.get('artists')]))
+                
+                artists = []
+                genres = []
+                batch_size = 50
+                
+                for i in range(0, len(artist_ids), batch_size):
+                    batch_ids = artist_ids[i:i+batch_size]
+                    try:
+                        artist_response = sp.artists(batch_ids)
+                        batch_artists = artist_response.get('artists', [])
+                        artists.extend(batch_artists)
+                        
+                        for artist in batch_artists:
+                            genres.extend(artist.get('genres', []))
+                        
+                        time.sleep(0.1)  # Rate limiting
+                    except Exception as e:
+                        st.warning(f"Could not get artists for batch {i//batch_size + 1}: {e}")
+                
+                data['artists'] = artists
+                data['genres'] = genres
+                st.write(f"Collected {len(artists)} artists and {len(genres)} genre tags")
+                
+            except Exception as e:
+                st.warning(f"Could not get artist information: {e}")
         
-        # Get saved tracks (liked songs)
+        # Get top artists
         try:
-            saved = sp.current_user_saved_tracks(limit=50)
-            user_data['saved_tracks'] = [item['track'] for item in saved['items']]
-            st.write(f"  ✅ Saved tracks: {len(user_data['saved_tracks'])}")
+            response = sp.current_user_top_artists(limit=20)
+            top_artists = response.get('items', [])
+            data['top_artists'] = top_artists
+            st.write(f"Collected {len(top_artists)} top artists")
         except Exception as e:
-            st.write(f"  ❌ Saved tracks error: {e}")
+            st.warning(f"Could not get top artists: {e}")
         
         # Get playlists
         try:
-            playlists = sp.current_user_playlists(limit=20)
-            user_data['playlists'] = playlists['items']
-            st.write(f"  ✅ Playlists: {len(user_data['playlists'])}")
+            response = sp.current_user_playlists(limit=20)
+            playlists = response.get('items', [])
+            data['playlists'] = playlists
+            st.write(f"Collected {len(playlists)} playlists")
         except Exception as e:
-            st.write(f"  ❌ Playlists error: {e}")
+            st.warning(f"Could not get playlists: {e}")
         
-        # Get following
-        try:
-            following = sp.current_user_followed_artists(limit=20)
-            user_data['following'] = following['artists']['items']
-            st.write(f"  ✅ Following: {len(user_data['following'])}")
-        except Exception as e:
-            st.write(f"  ❌ Following error: {e}")
+        # Create data fingerprint
+        fingerprint_data = {
+            'user_id': user_info['id'],
+            'track_count': len(data['tracks']),
+            'genre_count': len(data['genres']),
+            'artist_count': len(data['artists']),
+            'track_sample': [t['name'] for t in data['tracks'][:10]],
+            'genre_sample': list(set(data['genres']))[:10]
+        }
         
-        return user_data
+        fingerprint_str = str(fingerprint_data)
+        data['fingerprint'] = hashlib.md5(fingerprint_str.encode()).hexdigest()[:12]
+        
+        st.success(f"Data collection complete! Fingerprint: {data['fingerprint']}")
+        
+        return data
         
     except Exception as e:
-        st.error(f"Error collecting user data: {e}")
+        st.error(f"Error during data collection: {e}")
         return None
 
-def create_user_signature(user_data):
-    """Create a unique signature from user's actual Spotify data"""
+def extract_music_features(data):
+    """Extract features for personality prediction"""
     
-    if not user_data:
+    if not data or not data['tracks']:
         return None
     
-    # Extract key identifying information
-    profile = user_data['user_profile']
+    tracks = data['tracks']
+    audio_features = data['audio_features']
+    genres = data['genres']
     
-    # Get track names from all sources
-    all_track_names = []
+    # Basic track statistics
+    popularities = [track.get('popularity', 50) for track in tracks]
+    durations = [track.get('duration_ms', 200000) for track in tracks]
+    explicit_count = sum(1 for track in tracks if track.get('explicit', False))
     
-    # From top tracks
-    for period in user_data['top_tracks'].values():
-        all_track_names.extend([track['name'] for track in period])
-    
-    # From recent and saved
-    all_track_names.extend([track['name'] for track in user_data['recent_tracks']])
-    all_track_names.extend([track['name'] for track in user_data['saved_tracks']])
-    
-    # Get artist names from all sources
-    all_artist_names = []
-    
-    # From top artists
-    for period in user_data['top_artists'].values():
-        all_artist_names.extend([artist['name'] for artist in period])
-    
-    # From tracks
-    for period in user_data['top_tracks'].values():
-        all_artist_names.extend([track['artists'][0]['name'] for track in period])
-    
-    for track in user_data['recent_tracks'] + user_data['saved_tracks']:
-        if track['artists']:
-            all_artist_names.append(track['artists'][0]['name'])
-    
-    # Get playlist names
-    playlist_names = [playlist['name'] for playlist in user_data['playlists']]
-    
-    # Get following names
-    following_names = [artist['name'] for artist in user_data['following']]
-    
-    # Create comprehensive signature
-    signature_data = {
-        'user_id': profile['id'],
-        'display_name': profile['display_name'],
-        'followers': profile['followers'],
-        'country': profile['country'],
-        'unique_tracks': len(set(all_track_names)),
-        'unique_artists': len(set(all_artist_names)),
-        'total_tracks': len(all_track_names),
-        'total_artists': len(all_artist_names),
-        'playlists_count': len(playlist_names),
-        'following_count': len(following_names),
-        'top_tracks_sample': sorted(list(set(all_track_names)))[:10],
-        'top_artists_sample': sorted(list(set(all_artist_names)))[:10],
-        'playlist_sample': playlist_names[:5],
-        'following_sample': following_names[:5]
+    features = {
+        # Basic preferences
+        'avg_popularity': np.mean(popularities) / 100,
+        'mainstream_preference': sum(1 for p in popularities if p > 70) / len(popularities),
+        'underground_preference': sum(1 for p in popularities if p < 30) / len(popularities),
+        'explicit_content_ratio': explicit_count / len(tracks),
+        'avg_track_length': np.mean(durations) / 300000,  # Normalized to ~5 minutes
+        
+        # Diversity metrics
+        'artist_diversity': len(set(track['artists'][0]['name'] for track in tracks)) / len(tracks),
+        'genre_diversity': len(set(genres)) / max(len(genres), 1) if genres else 0,
+        'unique_genres_count': len(set(genres)),
+        
+        # Audio feature analysis
+        'energy': 0.5,
+        'danceability': 0.5,
+        'valence': 0.5,
+        'acousticness': 0.5,
+        'instrumentalness': 0.5,
+        'speechiness': 0.5,
+        'loudness': 0.5,
+        'tempo': 0.5
     }
     
-    # Create hash of the signature
-    signature_string = json.dumps(signature_data, sort_keys=True)
-    signature_hash = hashlib.sha256(signature_string.encode()).hexdigest()[:16]
+    # Extract audio features if available
+    if audio_features:
+        audio_df = pd.DataFrame(audio_features)
+        
+        for feature in ['energy', 'danceability', 'valence', 'acousticness', 
+                       'instrumentalness', 'speechiness']:
+            if feature in audio_df.columns:
+                features[feature] = audio_df[feature].mean()
+        
+        if 'loudness' in audio_df.columns:
+            # Normalize loudness (typically -60 to 0 dB)
+            features['loudness'] = (audio_df['loudness'].mean() + 60) / 60
+        
+        if 'tempo' in audio_df.columns:
+            # Normalize tempo (typically 50-200 BPM)
+            features['tempo'] = np.clip(audio_df['tempo'].mean() / 200, 0, 1)
     
-    return {
-        'signature_hash': signature_hash,
-        'signature_data': signature_data,
-        'raw_data_sample': {
-            'tracks': all_track_names[:5],
-            'artists': all_artist_names[:5],
-            'playlists': playlist_names[:3]
-        }
-    }
+    # Genre analysis
+    if genres:
+        genre_text = ' '.join(genres).lower()
+        
+        # Define genre categories
+        electronic_terms = ['electronic', 'house', 'techno', 'edm', 'dance', 'trance']
+        rock_terms = ['rock', 'metal', 'punk', 'alternative', 'grunge', 'indie rock']
+        pop_terms = ['pop', 'mainstream', 'chart', 'radio']
+        classical_terms = ['classical', 'orchestral', 'symphony', 'opera']
+        jazz_terms = ['jazz', 'blues', 'swing', 'bebop']
+        folk_terms = ['folk', 'country', 'americana', 'bluegrass']
+        hiphop_terms = ['hip hop', 'rap', 'hip-hop', 'trap']
+        
+        features['electronic_preference'] = sum(1 for term in electronic_terms if term in genre_text) / max(len(genres), 1)
+        features['rock_preference'] = sum(1 for term in rock_terms if term in genre_text) / max(len(genres), 1)
+        features['pop_preference'] = sum(1 for term in pop_terms if term in genre_text) / max(len(genres), 1)
+        features['classical_preference'] = sum(1 for term in classical_terms if term in genre_text) / max(len(genres), 1)
+        features['jazz_preference'] = sum(1 for term in jazz_terms if term in genre_text) / max(len(genres), 1)
+        features['folk_preference'] = sum(1 for term in folk_terms if term in genre_text) / max(len(genres), 1)
+        features['hiphop_preference'] = sum(1 for term in hiphop_terms if term in genre_text) / max(len(genres), 1)
+    else:
+        # Default values if no genres available
+        for pref in ['electronic_preference', 'rock_preference', 'pop_preference', 
+                    'classical_preference', 'jazz_preference', 'folk_preference', 'hiphop_preference']:
+            features[pref] = 0.0
+    
+    # Ensure all values are in [0, 1] range
+    for key, value in features.items():
+        if pd.isna(value) or value is None:
+            features[key] = 0.5
+        else:
+            features[key] = np.clip(float(value), 0.0, 1.0)
+    
+    return features
 
-def display_user_analysis(user_data, signature):
-    """Display comprehensive user analysis"""
+def predict_personality(features):
+    """Predict Big Five personality traits from music features"""
     
-    st.header("🔍 User Data Analysis")
+    if not features:
+        return None
     
-    profile = user_data['user_profile']
-    sig_data = signature['signature_data']
+    predictions = {}
     
-    # User identity
-    col1, col2 = st.columns(2)
+    # OPENNESS TO EXPERIENCE
+    # High openness: diverse genres, experimental music, less mainstream
+    openness = (
+        features['genre_diversity'] * 0.25 +
+        features['artist_diversity'] * 0.2 +
+        (1 - features['mainstream_preference']) * 0.2 +
+        features['classical_preference'] * 0.1 +
+        features['jazz_preference'] * 0.1 +
+        features['instrumentalness'] * 0.1 +
+        (1 - features['pop_preference']) * 0.05
+    )
+    predictions['Openness'] = np.clip(openness * 4 + 1, 1, 5)
+    
+    # CONSCIENTIOUSNESS
+    # High conscientiousness: mainstream music, consistent preferences, less explicit
+    conscientiousness = (
+        features['mainstream_preference'] * 0.3 +
+        (1 - features['explicit_content_ratio']) * 0.25 +
+        features['pop_preference'] * 0.2 +
+        (1 - features['genre_diversity']) * 0.15 +
+        features['valence'] * 0.1
+    )
+    predictions['Conscientiousness'] = np.clip(conscientiousness * 4 + 1, 1, 5)
+    
+    # EXTRAVERSION
+    # High extraversion: energetic, danceable, popular music
+    extraversion = (
+        features['energy'] * 0.25 +
+        features['danceability'] * 0.25 +
+        features['electronic_preference'] * 0.15 +
+        features['pop_preference'] * 0.15 +
+        features['mainstream_preference'] * 0.1 +
+        features['valence'] * 0.1
+    )
+    predictions['Extraversion'] = np.clip(extraversion * 4 + 1, 1, 5)
+    
+    # AGREEABLENESS
+    # High agreeableness: positive, harmonious music, less aggressive
+    agreeableness = (
+        features['valence'] * 0.3 +
+        features['acousticness'] * 0.2 +
+        (1 - features['explicit_content_ratio']) * 0.2 +
+        features['folk_preference'] * 0.1 +
+        features['pop_preference'] * 0.1 +
+        (1 - features['energy']) * 0.1
+    )
+    predictions['Agreeableness'] = np.clip(agreeableness * 4 + 1, 1, 5)
+    
+    # NEUROTICISM
+    # High neuroticism: emotional music, less positive valence
+    neuroticism = (
+        (1 - features['valence']) * 0.3 +
+        features['explicit_content_ratio'] * 0.2 +
+        features['rock_preference'] * 0.15 +
+        features['energy'] * 0.15 +
+        (1 - features['mainstream_preference']) * 0.1 +
+        features['speechiness'] * 0.1
+    )
+    predictions['Neuroticism'] = np.clip(neuroticism * 4 + 1, 1, 5)
+    
+    # Round to reasonable precision
+    for trait in predictions:
+        predictions[trait] = round(predictions[trait], 2)
+    
+    return predictions
+
+def display_results(data, features, predictions):
+    """Display analysis results"""
+    
+    user_info = data['user_info']
+    
+    st.header("Your Musical Personality Analysis")
+    
+    # User verification
+    col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("👤 User Identity")
-        st.write(f"**Display Name:** {profile['display_name']}")
-        st.write(f"**User ID:** {profile['id']}")
-        st.write(f"**Followers:** {profile['followers']:,}")
-        st.write(f"**Country:** {profile['country']}")
-        st.write(f"**Data Signature:** `{signature['signature_hash']}`")
+        st.subheader("User Verification")
+        st.write(f"**Name:** {user_info['display_name']}")
+        st.write(f"**User ID:** {user_info['id']}")
+        st.write(f"**Country:** {user_info['country']}")
+        st.write(f"**Data Fingerprint:** `{data['fingerprint']}`")
     
     with col2:
-        st.subheader("📊 Music Library Stats")
-        st.metric("Unique Tracks Found", sig_data['unique_tracks'])
-        st.metric("Unique Artists Found", sig_data['unique_artists'])
-        st.metric("Total Playlists", sig_data['playlists_count'])
-        st.metric("Artists Following", sig_data['following_count'])
+        st.metric("Tracks Analyzed", len(data['tracks']))
+        st.metric("Unique Genres", features['unique_genres_count'])
+        st.metric("Artist Diversity", f"{features['artist_diversity']:.2f}")
     
-    # Show actual data samples
-    st.subheader("🎵 Your Actual Music Data (Proof of Uniqueness)")
-    
-    tab1, tab2, tab3, tab4 = st.tabs(["Top Tracks", "Top Artists", "Playlists", "Following"])
-    
-    with tab1:
-        if sig_data['top_tracks_sample']:
-            st.write("Sample of your top tracks:")
-            for i, track in enumerate(sig_data['top_tracks_sample'], 1):
-                st.write(f"{i}. {track}")
-        else:
-            st.write("No top tracks found")
-    
-    with tab2:
-        if sig_data['top_artists_sample']:
-            st.write("Sample of your top artists:")
-            for i, artist in enumerate(sig_data['top_artists_sample'], 1):
-                st.write(f"{i}. {artist}")
-        else:
-            st.write("No top artists found")
-    
-    with tab3:
-        if sig_data['playlist_sample']:
-            st.write("Sample of your playlists:")
-            for i, playlist in enumerate(sig_data['playlist_sample'], 1):
-                st.write(f"{i}. {playlist}")
-        else:
-            st.write("No playlists found")
-    
-    with tab4:
-        if sig_data['following_sample']:
-            st.write("Sample of artists you follow:")
-            for i, artist in enumerate(sig_data['following_sample'], 1):
-                st.write(f"{i}. {artist}")
-        else:
-            st.write("No followed artists found")
-    
-    return signature
-
-def compare_user_signatures():
-    """Compare signatures from different users to verify isolation"""
-    
-    if 'user_signatures' not in st.session_state:
-        st.session_state.user_signatures = []
-    
-    signatures = st.session_state.user_signatures
-    
-    if len(signatures) > 1:
-        st.header("🔍 Multi-User Comparison")
+    # Personality radar chart
+    if predictions:
+        st.subheader("Big Five Personality Traits")
         
-        # Create comparison table
-        comparison_data = []
-        for sig in signatures:
-            data = sig['signature_data']
-            comparison_data.append({
-                'User ID': data['user_id'],
-                'Display Name': data['display_name'],
-                'Signature Hash': sig['signature_hash'],
-                'Unique Tracks': data['unique_tracks'],
-                'Unique Artists': data['unique_artists'],
-                'Playlists': data['playlists_count'],
-                'Following': data['following_count'],
-                'Collection Time': sig.get('timestamp', 'Unknown')
-            })
+        fig = go.Figure()
         
-        comparison_df = pd.DataFrame(comparison_data)
-        st.dataframe(comparison_df)
+        traits = list(predictions.keys())
+        scores = list(predictions.values())
         
-        # Check for isolation
-        hashes = [sig['signature_hash'] for sig in signatures]
-        user_ids = [sig['signature_data']['user_id'] for sig in signatures]
+        fig.add_trace(go.Scatterpolar(
+            r=scores,
+            theta=traits,
+            fill='toself',
+            name='Your Personality',
+            line_color='rgb(46, 204, 113)'
+        ))
         
-        st.subheader("🔍 Isolation Verification")
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[1, 5],
+                    tickvals=[1, 2, 3, 4, 5]
+                )
+            ),
+            showlegend=False,
+            title="Your Musical Personality Profile",
+            height=500
+        )
         
-        if len(set(hashes)) == len(hashes):
-            st.success("✅ SUCCESS: All users have unique data signatures!")
-            st.success("✅ User isolation is working correctly!")
-        else:
-            st.error("❌ FAILURE: Duplicate signatures detected!")
-            st.error("❌ Users are seeing identical data - isolation failed!")
+        st.plotly_chart(fig, use_container_width=True)
         
-        if len(set(user_ids)) == len(user_ids):
-            st.success("✅ All different user IDs confirmed")
-        else:
-            st.error("❌ Duplicate user IDs detected!")
+        # Detailed trait descriptions
+        trait_descriptions = {
+            'Openness': {
+                'high': "You love exploring new musical territories and unconventional sounds!",
+                'medium': "You balance familiar favorites with occasional musical exploration.",
+                'low': "You prefer sticking to tried-and-true musical styles you know you'll enjoy."
+            },
+            'Conscientiousness': {
+                'high': "Your music choices tend to be thoughtful and organized.",
+                'medium': "You show some structure in your musical preferences while staying flexible.",
+                'low': "Your musical taste is spontaneous and driven by mood and impulse!"
+            },
+            'Extraversion': {
+                'high': "You gravitate toward energetic, social music that gets you moving!",
+                'medium': "You enjoy both upbeat social music and quieter personal listening.",
+                'low': "You prefer introspective, calmer music for personal reflection."
+            },
+            'Agreeableness': {
+                'high': "You love harmonious, positive music that brings people together!",
+                'medium': "You appreciate both uplifting and more complex emotional music.",
+                'low': "You're drawn to more intense, unconventional, or challenging sounds."
+            },
+            'Neuroticism': {
+                'high': "Music serves as an important emotional outlet and processing tool for you.",
+                'medium': "Your music reflects a balanced range of emotional experiences.",
+                'low': "You tend to prefer stable, positive music that maintains good vibes."
+            }
+        }
         
-        # Show detailed differences
-        st.subheader("🔍 Detailed Differences")
+        st.subheader("Personality Insights")
         
-        for i, sig in enumerate(signatures):
-            with st.expander(f"User {i+1}: {sig['signature_data']['display_name']}"):
-                st.json(sig['raw_data_sample'])
+        for trait, score in predictions.items():
+            if score >= 3.5:
+                category = 'high'
+            elif score <= 2.5:
+                category = 'low'
+            else:
+                category = 'medium'
+            
+            with st.expander(f"{trait}: {score:.1f}/5.0"):
+                st.write(trait_descriptions[trait][category])
     
-    else:
-        st.info("Need at least 2 users to compare. Have your friend run this test too!")
+    # Music analysis details
+    with st.expander("Detailed Music Analysis"):
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Listening Preferences")
+            st.write(f"**Mainstream preference:** {features['mainstream_preference']:.2f}")
+            st.write(f"**Underground preference:** {features['underground_preference']:.2f}")
+            st.write(f"**Average popularity:** {features['avg_popularity']:.2f}")
+            st.write(f"**Explicit content ratio:** {features['explicit_content_ratio']:.2f}")
+        
+        with col2:
+            st.subheader("Audio Characteristics")
+            st.write(f"**Energy:** {features['energy']:.2f}")
+            st.write(f"**Danceability:** {features['danceability']:.2f}")
+            st.write(f"**Valence (positivity):** {features['valence']:.2f}")
+            st.write(f"**Acousticness:** {features['acousticness']:.2f}")
+        
+        # Genre preferences
+        if data['genres']:
+            st.subheader("Genre Preferences")
+            genre_prefs = {
+                'Electronic/Dance': features['electronic_preference'],
+                'Rock/Alternative': features['rock_preference'],
+                'Pop/Mainstream': features['pop_preference'],
+                'Classical': features['classical_preference'],
+                'Jazz/Blues': features['jazz_preference'],
+                'Folk/Country': features['folk_preference'],
+                'Hip-Hop/Rap': features['hiphop_preference']
+            }
+            
+            genre_df = pd.DataFrame(list(genre_prefs.items()), columns=['Genre', 'Preference'])
+            st.bar_chart(genre_df.set_index('Genre'))
+        
+        # Sample tracks
+        if data['tracks']:
+            st.subheader("Sample of Your Music")
+            sample_tracks = data['tracks'][:10]
+            track_df = pd.DataFrame([
+                {
+                    'Track': track['name'],
+                    'Artist': track['artists'][0]['name'],
+                    'Popularity': track.get('popularity', 0)
+                }
+                for track in sample_tracks
+            ])
+            st.dataframe(track_df, hide_index=True)
 
 def main():
-    st.title("✅ User Isolation Verification Test")
-    st.markdown("### Comprehensive test to verify each user sees only their own Spotify data")
+    st.title("Spotify Musical Personality Predictor")
+    st.markdown("Discover your Big Five personality traits through your music taste!")
     
-    # Instructions
-    with st.expander("📋 Test Instructions"):
-        st.markdown("""
-        **Step 1:** You run this test first
-        **Step 2:** Your friend (added to your Spotify app) runs this test in a separate browser
-        **Step 3:** Compare the signature hashes - they should be completely different
+    # Session info in sidebar
+    with st.sidebar:
+        st.header("Session Information")
+        st.write(f"Session ID: {get_unique_session_id()[:8]}...")
         
-        **What this test checks:**
-        - User profile information
-        - Top tracks/artists across all time periods
-        - Recently played tracks
-        - Saved/liked tracks
-        - User playlists
-        - Followed artists
-        
-        **Expected result:** Different signature hashes = successful isolation
-        """)
+        if st.button("Reset Session"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
     
-    sp = ensure_spotify_client()
+    # Authenticate with Spotify
+    sp = authenticate_spotify()
     
-    if st.button("🔍 Run Comprehensive Data Test", type="primary"):
+    if sp is None:
+        st.info("Please complete Spotify authentication to continue.")
+        return
+    
+    # Verify user identity
+    user_info = verify_user_identity(sp)
+    
+    if user_info is None:
+        st.error("Could not verify your Spotify account. Please try logging in again.")
+        if st.button("Try Again"):
+            clear_authentication_state()
+            st.rerun()
+        return
+    
+    # Main analysis button
+    if st.button("Analyze My Musical Personality", type="primary", use_container_width=True):
         
-        with st.spinner("Collecting comprehensive user data..."):
-            user_data = get_comprehensive_user_data(sp)
+        with st.spinner("Collecting your Spotify data..."):
+            data = collect_spotify_data(sp, user_info)
         
-        if user_data:
-            with st.spinner("Creating user signature..."):
-                signature = create_user_signature(user_data)
-            
-            if signature:
-                # Add timestamp
-                signature['timestamp'] = datetime.now().isoformat()
-                
-                # Display analysis
-                display_user_analysis(user_data, signature)
-                
-                # Store signature
-                if 'user_signatures' not in st.session_state:
-                    st.session_state.user_signatures = []
-                
-                st.session_state.user_signatures.append(signature)
-                
-                # Compare with other users
-                compare_user_signatures()
-                
-                st.success("✅ Test complete! Check the comparison section above.")
+        if data is None:
+            st.error("Could not collect your Spotify data. Please check your account permissions.")
+            return
         
+        with st.spinner("Analyzing your music preferences..."):
+            features = extract_music_features(data)
+        
+        if features is None:
+            st.error("Could not analyze your music data.")
+            return
+        
+        with st.spinner("Predicting your personality traits..."):
+            predictions = predict_personality(features)
+        
+        if predictions is None:
+            st.error("Could not generate personality predictions.")
+            return
+        
+        # Display results
+        display_results(data, features, predictions)
+        
+        # Store results for comparison
+        result_key = f"analysis_{get_unique_session_id()}"
+        st.session_state[result_key] = {
+            'user_info': user_info,
+            'predictions': predictions,
+            'fingerprint': data['fingerprint'],
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    # Show comparison if multiple analyses exist
+    analysis_keys = [k for k in st.session_state.keys() if k.startswith('analysis_')]
+    
+    if len(analysis_keys) > 1:
+        st.header("Session Comparison")
+        st.write("Multiple analyses detected:")
+        
+        for key in analysis_keys:
+            result = st.session_state[key]
+            st.write(f"**{result['user_info']['display_name']}** ({result['user_info']['id']}) - Fingerprint: `{result['fingerprint']}`")
+        
+        # Check for uniqueness
+        fingerprints = [st.session_state[key]['fingerprint'] for key in analysis_keys]
+        if len(set(fingerprints)) == len(fingerprints):
+            st.success("All analyses have unique data fingerprints - isolation is working!")
         else:
-            st.error("❌ Failed to collect user data")
-    
-    # Show current signatures
-    if 'user_signatures' in st.session_state and st.session_state.user_signatures:
-        st.subheader("📝 Test Results Summary")
-        signatures = st.session_state.user_signatures
-        st.write(f"**Tests completed:** {len(signatures)}")
-        
-        for i, sig in enumerate(signatures):
-            st.write(f"**User {i+1}:** {sig['signature_data']['display_name']} - Signature: `{sig['signature_hash']}`")
+            st.error("Duplicate fingerprints detected - there may be an isolation issue.")
 
 if __name__ == "__main__":
     main()
