@@ -17,15 +17,12 @@ def get_spotify_client():
        Uses a unique cache file per Streamlit session (and per client ID) to avoid token leaks.
     """
 
-    # Assign a unique session ID if this is the first run in this tab
     if "session_id" not in st.session_state:
         st.session_state.session_id = str(int(time.time() * 1000))
 
     session_id = st.session_state.session_id
-    # Include the client ID in the cache filename so different apps use different cache files
     cache_path = f".cache-{CLIENT_ID}-{session_id}"
 
-    # Check for auth code returned from Spotify
     params = st.query_params
     if "code" in params:
         code = params["code"]
@@ -36,22 +33,22 @@ def get_spotify_client():
             client_secret=CLIENT_SECRET,
             redirect_uri=REDIRECT_URI,
             scope="user-top-read user-read-recently-played",
-            cache_path=cache_path,       # unique cache per client and session
-            show_dialog=True             # always ask user to approve
+            cache_path=cache_path,
+            show_dialog=True
         )
 
         try:
             token_info = auth_manager.get_access_token(code, as_dict=True)
             if token_info and "access_token" in token_info:
-                # Create client
                 sp = spotipy.Spotify(auth=token_info["access_token"])
                 user = sp.current_user()
                 st.success(f"Token belongs to: {user.get('display_name', 'Unknown')} ({user.get('id', 'Unknown')})")
 
-                # Clear query parameters to prevent re-use
                 st.query_params.clear()
 
-                # Save token info to session state for potential reuse
+                # Save to session state so they persist across reruns
+                st.session_state.sp = sp
+                st.session_state.user = user
                 st.session_state.token_info = token_info
 
                 return sp, user
@@ -70,7 +67,7 @@ def get_spotify_client():
         scope="user-top-read user-read-recently-played",
         cache_path=cache_path,
         show_dialog=True,
-        state=f"debug_{session_id}"     # unique state per session
+        state=f"debug_{session_id}"
     )
     login_url = auth_manager.get_authorize_url()
     st.markdown(f"[Login with Spotify]({login_url})")
@@ -82,20 +79,16 @@ def test_data_collection(sp, user):
     st.write("Testing data collection...")
 
     try:
-        # Recent tracks
         recent = sp.current_user_recently_played(limit=5)
         recent_tracks = [item["track"]["name"] for item in recent["items"]]
 
-        # Top tracks
         top = sp.current_user_top_tracks(limit=5, time_range="short_term")
         top_tracks = [track["name"] for track in top["items"]]
 
-        # Create a simple fingerprint
         all_tracks = recent_tracks + top_tracks
         fingerprint_data = f"{user['id']}_{len(all_tracks)}_{'_'.join(all_tracks)}"
         fingerprint = hashlib.md5(fingerprint_data.encode()).hexdigest()[:8]
 
-        # Display results
         st.subheader(f"Data for: {user['display_name']} ({user['id']})")
         st.write(f"**Data fingerprint:** {fingerprint}")
 
@@ -107,7 +100,6 @@ def test_data_collection(sp, user):
         for track in top_tracks:
             st.write(f"- {track}")
 
-        # Store in session state for comparison
         if "test_results" not in st.session_state:
             st.session_state.test_results = []
 
@@ -151,7 +143,6 @@ def show_comparison():
     else:
         st.error("FAILURE: Duplicate user IDs detected")
 
-    # Detailed view
     st.subheader("Detailed Data")
     for i, result in enumerate(results):
         with st.expander(f"User {i + 1}: {result['display_name']}"):
@@ -166,7 +157,6 @@ def main():
         st.error("Missing Spotify credentials")
         st.stop()
 
-    # Buttons to clear session state
     if st.button("Reset (Keep Results)"):
         keys_to_keep = ["test_results", "session_id"]
         for key in list(st.session_state.keys()):
@@ -178,20 +168,21 @@ def main():
         st.session_state.clear()
         st.rerun()
 
-    # Authenticate user
-    sp, user = get_spotify_client()
+    # Reuse client/user from session state if available
+    sp = st.session_state.get("sp")
+    user = st.session_state.get("user")
 
-    # If authenticated, allow data collection
+    if not sp or not user:
+        sp, user = get_spotify_client()
+
     if sp and user:
         if st.button("Test Data Collection"):
             result = test_data_collection(sp, user)
             if result:
                 st.success("Data collection complete")
 
-    # Show comparison across users
     show_comparison()
 
-    # Instructions
     st.markdown("---")
     st.subheader("Test Instructions")
     st.write("1. You: Click login, authenticate, test data collection")
