@@ -1,4 +1,4 @@
-# app.py - Public Spotify personality app for any user
+# app.py - Fixed Spotify personality app
 import streamlit as st
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -24,19 +24,20 @@ class SpotifyPersonalityApp:
             self.redirect_uri = st.secrets["SPOTIFY_REDIRECT_URI"]
         except KeyError as e:
             st.error(f"Missing Spotify credential in secrets: {e}")
+            st.info("Please add your Spotify credentials to Streamlit secrets!")
             st.stop()
         
         # Scope for reading user's music data
         scope = "user-read-recently-played user-top-read user-read-private playlist-read-private user-library-read"
         
-        # Initialize Spotify client
+        # Initialize Spotify OAuth
         self.sp_oauth = SpotifyOAuth(
             client_id=self.client_id,
             client_secret=self.client_secret,
             redirect_uri=self.redirect_uri,
             scope=scope,
             cache_path=None,  # Don't cache in deployment
-            show_dialog=True
+            open_browser=False
         )
         
         self.sp = None
@@ -237,20 +238,18 @@ class SpotifyPersonalityApp:
         predictions = {}
         
         # EXTRAVERSION - Social, energetic, outgoing
-        # Research: Extraverts prefer energetic, upbeat, conventional music
         extraversion = (
             features['energy'] * 0.25 +
             features['danceability'] * 0.20 +
             features['valence'] * 0.15 +
             features['high_energy_ratio'] * 0.15 +
             features['danceable_ratio'] * 0.10 +
-            (features['loudness'] + 60) / 60 * 0.10 +  # Normalize loudness (-60 to 0)
+            (features['loudness'] + 60) / 60 * 0.10 +  # Normalize loudness
             features['mainstream_preference'] * 0.05
         )
         predictions['Extraversion'] = np.clip(extraversion * 5, 1, 5)
         
         # OPENNESS - Creative, curious, open to new experiences
-        # Research: Open people prefer complex, unconventional, diverse music
         openness = (
             features['genre_diversity'] * 0.25 +
             features['artist_diversity'] * 0.15 +
@@ -264,7 +263,6 @@ class SpotifyPersonalityApp:
         predictions['Openness'] = np.clip(openness * 5, 1, 5)
         
         # CONSCIENTIOUSNESS - Organized, disciplined, conventional
-        # Research: Conscientious people prefer mainstream, predictable music
         conscientiousness = (
             features['mainstream_preference'] * 0.30 +
             (1 - features['emotional_variance']) * 0.20 +
@@ -276,7 +274,6 @@ class SpotifyPersonalityApp:
         predictions['Conscientiousness'] = np.clip(conscientiousness * 5, 1, 5)
         
         # AGREEABLENESS - Cooperative, trusting, helpful
-        # Research: Agreeable people prefer positive, harmonious, conventional music
         agreeableness = (
             features['valence'] * 0.30 +
             features['positive_music_ratio'] * 0.20 +
@@ -288,7 +285,6 @@ class SpotifyPersonalityApp:
         predictions['Agreeableness'] = np.clip(agreeableness * 5, 1, 5)
         
         # NEUROTICISM - Emotional instability, anxiety, moodiness
-        # Research: Neurotic people prefer sad, emotional, complex music
         neuroticism = (
             (1 - features['valence']) * 0.25 +
             features['emotional_variance'] * 0.20 +
@@ -313,29 +309,29 @@ def create_personality_insights(predictions):
     
     descriptions = {
         'Extraversion': {
-            'high': "🎉 **Social Music Lover!** You gravitate toward energetic, danceable music that gets people moving. Your playlists are perfect for parties and social gatherings. You likely enjoy mainstream hits and music that creates a fun, social atmosphere.",
-            'medium': "🎵 **Balanced Social Energy** - You enjoy both upbeat social music and quieter personal listening. Your taste adapts well to different social situations.",
-            'low': "🎧 **Introspective Listener** - You prefer quieter, more contemplative music perfect for solo listening and reflection. You value music as personal experience over social sharing."
+            'high': "🎉 **Social Music Lover!** You gravitate toward energetic, danceable music that gets people moving. Your playlists are perfect for parties and social gatherings.",
+            'medium': "🎵 **Balanced Social Energy** - You enjoy both upbeat social music and quieter personal listening.",
+            'low': "🎧 **Introspective Listener** - You prefer quieter, more contemplative music perfect for solo listening and reflection."
         },
         'Openness': {
-            'high': "🎨 **Musical Explorer!** You're always discovering new artists, genres, and experimental sounds. You love unusual music that others might not 'get' and take pride in your unique taste. You probably have incredibly diverse playlists.",
-            'medium': "🎼 **Curious but Grounded** - You balance musical exploration with familiar favorites. You enjoy discovering new music but also appreciate established artists.",
-            'low': "📻 **Reliable Favorites** - You know what you like and stick with it! You prefer familiar genres and artists that consistently deliver what you enjoy. There's comfort in musical predictability."
+            'high': "🎨 **Musical Explorer!** You're always discovering new artists, genres, and experimental sounds. You love unusual music that others might not 'get'.",
+            'medium': "🎼 **Curious but Grounded** - You balance musical exploration with familiar favorites.",
+            'low': "📻 **Reliable Favorites** - You know what you like and stick with it! You prefer familiar genres and artists."
         },
         'Conscientiousness': {
-            'high': "📋 **Organized Music Habits** - Your music listening is structured and consistent. You probably have well-organized playlists, stick to routines, and prefer mainstream music that 'makes sense.' You like musical reliability.",
-            'medium': "⚖️ **Structured but Flexible** - You have some organization in your music habits but can be spontaneous when the mood strikes.",
-            'low': "🎲 **Spontaneous Music Spirit** - Your musical choices are driven by mood and moment! You're not tied to routines and enjoy letting your musical taste wander wherever it wants to go."
+            'high': "📋 **Organized Music Habits** - Your music listening is structured and consistent. You probably have well-organized playlists.",
+            'medium': "⚖️ **Structured but Flexible** - You have some organization in your music habits but can be spontaneous.",
+            'low': "🎲 **Spontaneous Music Spirit** - Your musical choices are driven by mood and moment!"
         },
         'Agreeableness': {
-            'high': "🤝 **Harmony Seeker** - You love music that brings people together! You prefer positive, uplifting songs that create good vibes. You probably enjoy music that most people can appreciate and sing along to.",
-            'medium': "🎶 **Emotionally Balanced** - You appreciate both uplifting music and more complex emotional expressions, adapting to different social contexts.",
-            'low': "🎸 **Edge Appreciator** - You're drawn to more intense, unconventional, or emotionally complex music. You don't need everyone to 'get' your music taste - you value authenticity over popularity."
+            'high': "🤝 **Harmony Seeker** - You love music that brings people together! You prefer positive, uplifting songs that create good vibes.",
+            'medium': "🎶 **Emotionally Balanced** - You appreciate both uplifting music and more complex emotional expressions.",
+            'low': "🎸 **Edge Appreciator** - You're drawn to more intense, unconventional, or emotionally complex music."
         },
         'Neuroticism': {
-            'high': "💭 **Emotional Music Connection** - Music is your emotional outlet! You're drawn to songs that match and help you process complex feelings. You might use music therapeutically and appreciate artists who aren't afraid of emotional depth.",
-            'medium': "🌊 **Mood-Responsive Listening** - Your music choices reflect your emotional state, ranging from comforting to energizing depending on what you need.",
-            'low': "☀️ **Stable Mood Music** - You prefer music that maintains positive vibes and emotional balance. You use music to stay upbeat rather than to process difficult emotions."
+            'high': "💭 **Emotional Music Connection** - Music is your emotional outlet! You're drawn to songs that help you process complex feelings.",
+            'medium': "🌊 **Mood-Responsive Listening** - Your music choices reflect your emotional state.",
+            'low': "☀️ **Stable Mood Music** - You prefer music that maintains positive vibes and emotional balance."
         }
     }
     
@@ -362,8 +358,8 @@ def main():
     st.title("🎵 Spotify Personality Predictor")
     st.markdown("### Discover your Big Five personality traits based on your Spotify listening habits!")
     
-    # Check if we have the auth code in URL
-    query_params = st.experimental_get_query_params()
+    # Check if we have the auth code in URL - UPDATED API
+    query_params = st.query_params
     
     # Initialize the app
     app = SpotifyPersonalityApp()
@@ -371,7 +367,7 @@ def main():
     # Handle authentication flow
     if 'code' in query_params:
         # User has returned from Spotify auth
-        auth_code = query_params['code'][0]
+        auth_code = query_params['code']
         
         with st.spinner("🔐 Authenticating with Spotify..."):
             if app.authenticate_user(auth_code):
@@ -464,17 +460,18 @@ def main():
                         genre_counts = Counter(music_data['genres'])
                         top_genres = dict(genre_counts.most_common(10))
                         
-                        genre_df = pd.DataFrame(list(top_genres.items()), columns=['Genre', 'Count'])
-                        st.bar_chart(genre_df.set_index('Genre'))
+                        if top_genres:
+                            genre_df = pd.DataFrame(list(top_genres.items()), columns=['Genre', 'Count'])
+                            st.bar_chart(genre_df.set_index('Genre'))
                     
                     # Try again button
                     if st.button("🔄 Analyze Again"):
-                        st.experimental_rerun()
+                        st.rerun()
                 
             else:
                 st.error("❌ Authentication failed. Please try again.")
                 if st.button("🔄 Try Again"):
-                    st.experimental_rerun()
+                    st.rerun()
     
     else:
         # Show login page
@@ -490,8 +487,6 @@ def main():
         - 🌍 **Genre diversity** and exploration patterns
         - 📈 **Popularity preferences** (mainstream vs. niche)
         - 🎯 **Listening consistency** and habits
-        
-        **Ready to discover your musical personality?**
         """)
         
         # Get auth URL and display login button
@@ -519,9 +514,8 @@ def main():
         
         st.markdown("""
         ---
-        
         **Privacy Note:** We only read your music data to generate your personality profile. 
-        We don't store your data or access your private information beyond what's needed for the analysis.
+        We don't store your data or access your private information.
         """)
 
 if __name__ == "__main__":
