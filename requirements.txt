@@ -5,3 +5,7 @@ matplotlib
 pandas
 python-dotenv
 scikit-learn
+requests
+joblib
+openpyxl
+plotly
