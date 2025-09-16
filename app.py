@@ -17,14 +17,15 @@ st.set_page_config(
 
 class SpotifyPersonalityApp:
     def __init__(self):
-        # Get credentials from Streamlit secrets (baked into the app)
-        try:
-            self.client_id = st.secrets["SPOTIFY_CLIENT_ID"]
-            self.client_secret = st.secrets["SPOTIFY_CLIENT_SECRET"]
-            self.redirect_uri = st.secrets["SPOTIFY_REDIRECT_URI"]
-        except KeyError as e:
-            st.error(f"Missing Spotify credential in secrets: {e}")
-            st.info("Please add your Spotify credentials to Streamlit secrets!")
+        # Get credentials from environment variables (same as your working code)
+        import os
+        self.client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+        self.client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+        self.redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI")
+        
+        if not (self.client_id and self.client_secret and self.redirect_uri):
+            st.error("Missing Spotify credentials in environment variables")
+            st.info("Please add SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, and SPOTIPY_REDIRECT_URI to your Streamlit secrets!")
             st.stop()
         
         # Scope for reading user's music data
