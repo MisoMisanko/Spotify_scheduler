@@ -432,9 +432,104 @@ def create_features_from_metadata(music_data):
     hiphop_terms = ['hip hop', 'rap', 'hip-hop', 'trap', 'drill']
     hiphop_score = sum(1 for term in hiphop_terms if term in genre_text) / max(len(all_genres), 1)
     
-    # World/Latin music detection (NEW - this should differentiate your music)
-    world_terms = ['latin', 'reggaeton', 'salsa', 'bachata', 'spanish', 'mexican', 'world', 'international']
+    # World/Latin music detection - MASSIVELY EXPANDED for cumbia and all Latino variants
+    world_terms = [
+        # Cumbia variants and related
+        'cumbia', 'cumbia villera', 'cumbia santafesina', 'cumbia peruana', 'cumbia colombiana', 
+        'cumbia mexicana', 'cumbia argentina', 'cumbia rebajada', 'cumbia sonidera', 'cumbia grupera',
+        'cumbia romantica', 'cumbia tropical', 'cumbia andina', 'cumbia amazonica', 'cumbia urbana',
+        'cumbia fusion', 'cumbia electronica', 'cumbia digital', 'nueva cumbia', 'neo cumbia',
+        'cumbia pop', 'cumbia rock', 'cumbia rap', 'cumbia reggae',
+        
+        # Core Latino genres
+        'latin', 'latino', 'reggaeton', 'salsa', 'bachata', 'merengue', 'bolero', 'ranchera',
+        'banda', 'mariachi', 'grupera', 'norteno', 'nortena', 'tejano', 'conjunto',
+        'vallenato', 'champeta', 'porro', 'gaita', 'bambuco', 'pasillo', 'joropo',
+        'son', 'son cubano', 'mambo', 'cha cha', 'rumba', 'conga', 'bossa nova',
+        
+        # Regional/Country specific
+        'mexican', 'colombia', 'colombian', 'argentina', 'argentinian', 'peru', 'peruvian',
+        'chile', 'chilean', 'venezuela', 'venezuelan', 'ecuador', 'ecuadorian', 'bolivia', 'bolivian',
+        'uruguay', 'uruguayan', 'paraguay', 'paraguayan', 'panama', 'panamanian',
+        'costa rica', 'costa rican', 'guatemala', 'guatemalan', 'honduras', 'honduran',
+        'nicaragua', 'nicaraguan', 'el salvador', 'salvadoran', 'cuba', 'cuban',
+        'dominican', 'puerto rico', 'puerto rican', 'brasil', 'brazilian', 'brazil',
+        
+        # Language indicators
+        'spanish', 'espanol', 'español', 'portugues', 'português', 'portuguese',
+        
+        # Pop/Rock Latino
+        'latin pop', 'pop latino', 'rock en espanol', 'rock en español', 'rock latino',
+        'latin rock', 'latin alternative', 'latin indie', 'indie latino', 'alternativo',
+        'rock alternativo', 'pop rock latino', 'balada', 'baladas',
+        
+        # Urban Latino
+        'reggaeton', 'trap latino', 'latin trap', 'urbano latino', 'latin urban',
+        'dembow', 'perreo', 'latin hip hop', 'rap latino', 'hip hop latino',
+        'latin r&b', 'r&b latino',
+        
+        # Traditional/Folk
+        'folk latino', 'latin folk', 'tradicional', 'musica tradicional', 'folklorico',
+        'folklorica', 'andina', 'andean', 'amazonica', 'amazonian', 'llanera', 'tropical',
+        'musica tropical', 'caribe', 'caribbean', 'antillana', 'antillean',
+        
+        # Electronic/Fusion
+        'latin electronic', 'electronica latina', 'latin house', 'latin techno',
+        'latin bass', 'moombahton', 'latin breaks', 'tribal latino', 'latin ambient',
+        
+        # Modern genres
+        'latin soul', 'latin funk', 'latin jazz', 'jazz latino', 'boogaloo', 'latin disco',
+        'latin punk', 'punk latino', 'latin metal', 'metal latino', 'latin hardcore',
+        
+        # Generic world tags
+        'world', 'world music', 'international', 'global', 'ethnic', 'traditional',
+        'indigenous', 'native', 'aboriginal', 'tribal'
+    ]
+    
     world_score = sum(1 for term in world_terms if term in genre_text) / max(len(all_genres), 1)
+    
+    # Also check track names for Spanish/Portuguese words (common in cumbia)
+    track_names_text = ' '.join([track['name'].lower() for track in tracks])
+    spanish_words = [
+        'amor', 'corazon', 'corazón', 'vida', 'luna', 'sol', 'noche', 'dia', 'día',
+        'mujer', 'hombre', 'niña', 'niño', 'casa', 'agua', 'fuego', 'tierra', 'cielo',
+        'tiempo', 'amigo', 'amiga', 'hermano', 'hermana', 'madre', 'padre', 'hijo', 'hija',
+        'baila', 'baile', 'danza', 'ritmo', 'musica', 'música', 'cancion', 'canción',
+        'fiesta', 'alegria', 'alegría', 'feliz', 'triste', 'loco', 'loca', 'bonita', 'bonito',
+        'mi', 'tu', 'tú', 'el', 'la', 'que', 'como', 'cómo', 'donde', 'dónde', 'cuando', 'cuándo',
+        'si', 'sí', 'no', 'pero', 'para', 'con', 'sin', 'por', 'de', 'en', 'a', 'y', 'o', 'u',
+        'esta', 'está', 'este', 'esto', 'esa', 'ese', 'eso', 'aqui', 'aquí', 'alli', 'allí',
+        'vamos', 'voy', 'vas', 'va', 'van', 'ven', 'ver', 'veo', 'ves', 've',
+        'soy', 'eres', 'es', 'somos', 'son', 'estar', 'estoy', 'estas', 'estás'
+    ]
+    spanish_content = sum(1 for word in spanish_words if word in track_names_text) / max(len(tracks), 1)
+    
+    # Check artist names for Latino indicators (expanded)
+    artist_names_text = ' '.join([track['artists'][0]['name'].lower() for track in tracks])
+    latino_artist_indicators = [
+        # Common first names
+        'juan', 'carlos', 'luis', 'antonio', 'manuel', 'jose', 'josé', 'maria', 'maría',
+        'ana', 'carmen', 'pedro', 'pablo', 'miguel', 'rafael', 'ricardo', 'fernando',
+        'alejandro', 'francisco', 'javier', 'diego', 'sergio', 'mario', 'alberto',
+        'jorge', 'oscar', 'óscar', 'eduardo', 'roberto', 'daniel', 'david', 'jesus', 'jesús',
+        # Common last names/indicators
+        'rodriguez', 'rodríguez', 'martinez', 'martínez', 'garcia', 'garcía', 'lopez', 'lópez',
+        'gonzalez', 'gonzález', 'sanchez', 'sánchez', 'ramirez', 'ramírez', 'torres', 'flores',
+        'rivera', 'morales', 'jimenez', 'jiménez', 'mendoza', 'castillo', 'vargas', 'herrera',
+        'medina', 'guerrero', 'ramos', 'ayala', 'cruz', 'moreno', 'ortiz', 'gutierrez', 'gutiérrez',
+        # Band/group indicators
+        'los', 'las', 'la', 'el', 'grupo', 'banda', 'orquesta', 'conjunto', 'mariachi',
+        'cumbia', 'sonora', 'tropical', 'internacional', 'musical', 'super', 'súper'
+    ]
+    artist_latino_score = sum(1 for indicator in latino_artist_indicators if indicator in artist_names_text) / max(len(tracks), 1)
+    
+    # Combine all Latino indicators with weighted scores
+    combined_world_score = (
+        world_score * 0.6 +           # Genre tags most reliable
+        spanish_content * 0.25 +      # Spanish lyrics good indicator  
+        artist_latino_score * 0.15    # Artist names helpful but less reliable
+    )
+    world_score = min(1.0, combined_world_score)  # Cap at 1.0
     
     # Create the EXACT 35 features the behavioral model expects:
     
@@ -1139,12 +1234,12 @@ def main():
                     st.metric("Mainstream Score", f"{features['mainstream_preference']:.0%}")
                 
                 with col2:
-                    st.metric("Unique Genres", features['unique_genres_count'])
-                    st.metric("Genre Diversity", f"{features['genre_diversity']:.2f}")
+                    st.metric("Unique Genres", features.get('unique_genres_count', 0))
+                    st.metric("Genre Diversity", f"{features.get('genre_diversity', 0):.2f}")
                 
                 with col3:
-                    st.metric("Artist Diversity", f"{features['artist_diversity']:.2f}")
-                    st.metric("Avg Popularity", f"{features['popularity']:.0%}")
+                    st.metric("Artist Diversity", f"{features.get('artist_diversity', 0):.2f}")
+                    st.metric("Avg Popularity", f"{features.get('popularity', 0):.0%}")
                 
                 # Genre preferences
                 st.subheader("Your Genre Preferences")
