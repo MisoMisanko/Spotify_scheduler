@@ -405,12 +405,25 @@ def create_features_from_metadata(music_data):
     # Get enriched genre/tag data
     all_genres = genres + enriched_data.get('genres_enriched', [])
     
+    # DEBUG: Show what genres we actually have
+    st.write(f"DEBUG GENRES: Raw Spotify genres: {genres[:10] if genres else 'NONE'}")
+    st.write(f"DEBUG GENRES: Enriched genres: {enriched_data.get('genres_enriched', [])[:10]}")
+    st.write(f"DEBUG GENRES: Combined genres: {all_genres[:10] if all_genres else 'NONE'}")
+    st.write(f"DEBUG GENRES: Total genre count: {len(all_genres)}")
+    
+    # DEBUG: Show sample track and artist names
+    sample_tracks = [track['name'] for track in tracks[:5]]
+    sample_artists = [track['artists'][0]['name'] for track in tracks[:5]]
+    st.write(f"DEBUG TRACKS: Sample track names: {sample_tracks}")
+    st.write(f"DEBUG ARTISTS: Sample artist names: {sample_artists}")
+    
     # Create EXACTLY the features the behavioral model was trained on
     # These should match the original audio-feature-based training
     features = {}
     
-    # Simulate audio features from metadata (matching original behavioral model)
+    # Analyze genres for personality indicators
     genre_text = ' '.join(all_genres).lower()
+    st.write(f"DEBUG: Genre text for analysis: '{genre_text[:100]}...' (length: {len(genre_text)})")
     
     # Electronic/Dance detection (affects energy, danceability)
     electronic_terms = ['electronic', 'dance', 'house', 'techno', 'edm', 'club', 'party', 'disco']
