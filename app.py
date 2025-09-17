@@ -370,7 +370,7 @@ def analyze_listening_consistency(listening_data, genres_by_period):
     return consistency_metrics
 
 def predict_personality_from_genres(genre_data, consistency_metrics, predictor):
-    """Predict personality directly from genre preferences with consistency adjustments"""
+    """Predict personality directly from genre preferences with enhanced sensitivity"""
     
     # Calculate overall genre preferences (weighted by recency)
     all_genres = []
@@ -392,9 +392,6 @@ def predict_personality_from_genres(genre_data, consistency_metrics, predictor):
             weighted_genre_counts[genre] += weight
             total_weight += weight
     
-    # Normalize to get preferences on 1-5 scale
-    genre_preferences = {}
-    
     # Get all expected genres for the model
     expected_genres = [
         'Music', 'Slow songs or fast songs', 'Dance', 'Folk', 'Country',
@@ -403,20 +400,26 @@ def predict_personality_from_genres(genre_data, consistency_metrics, predictor):
         'Alternative', 'Latino', 'Techno, Trance', 'Opera'
     ]
     
-    # Calculate preferences (1-5 scale)
+    # Calculate preferences with MORE EXTREME scaling (1-5 scale)
     max_count = max(weighted_genre_counts.values()) if weighted_genre_counts else 1
+    genre_preferences = {}
     
     for genre in expected_genres:
         if genre in weighted_genre_counts:
-            # Scale to 1-5 based on relative preference
+            # More aggressive scaling - amplify differences
             raw_pref = weighted_genre_counts[genre] / max_count
-            # Map to 1-5 scale (1=don't like, 5=love)
-            preference = 1 + (raw_pref * 4)
+            # Use exponential scaling to create more extreme preferences
+            if raw_pref > 0.3:  # Strong preference
+                preference = 3.5 + (raw_pref * 1.5)  # Scale 3.5-5.0
+            elif raw_pref > 0.1:  # Moderate preference  
+                preference = 2.5 + (raw_pref * 2)    # Scale 2.5-3.5
+            else:  # Low/no preference
+                preference = 1.0 + (raw_pref * 1.5)  # Scale 1.0-2.5
         else:
-            # Neutral preference for unheard genres
-            preference = 3.0
+            # Lower neutral for unheard genres to create more contrast
+            preference = 2.5
         
-        genre_preferences[genre] = preference
+        genre_preferences[genre] = min(5.0, max(1.0, preference))
     
     # Get base predictions
     base_predictions = predictor.predict_from_genres(genre_preferences)
@@ -424,30 +427,88 @@ def predict_personality_from_genres(genre_data, consistency_metrics, predictor):
     if 'error' in base_predictions:
         return base_predictions
     
-    # Adjust predictions based on listening consistency
+    # MUCH MORE AGGRESSIVE adjustments based on musical patterns
     adjusted_predictions = base_predictions.copy()
     
-    # Consistency affects Openness (less consistent = more open)
-    if 'preference_correlation' in consistency_metrics:
-        correlation = consistency_metrics['preference_correlation']
-        openness_adjustment = (1 - correlation) * 0.5  # Max 0.5 point adjustment
-        adjusted_predictions['Openness'] = min(5.0, max(1.0, 
-            adjusted_predictions['Openness'] + openness_adjustment))
+    # Genre-specific personality mappings (based on research)
+    alternative_score = weighted_genre_counts.get('Alternative', 0)
+    pop_score = weighted_genre_counts.get('Pop', 0)
+    rock_score = weighted_genre_counts.get('Rock', 0)
+    classical_score = weighted_genre_counts.get('Classical music', 0)
+    punk_score = weighted_genre_counts.get('Punk', 0)
+    hiphop_score = weighted_genre_counts.get('Hiphop, Rap', 0)
     
-    # Diversity affects Openness positively
+    # OPENNESS: Alternative/experimental music = higher openness
+    openness_boost = 0
+    if alternative_score > 0.2 * max_count:  # Significant alternative listening
+        openness_boost += 0.8
+    if classical_score > 0.1 * max_count:
+        openness_boost += 0.6
+    if punk_score > 0.1 * max_count:
+        openness_boost += 0.4
+    
+    # Diversity bonus
     if 'short_term_diversity' in consistency_metrics:
         diversity = consistency_metrics['short_term_diversity']
-        # Normalize diversity (typical range 0-3, high diversity = high openness)
-        diversity_boost = min(0.5, diversity / 6)  # Max 0.5 boost
-        adjusted_predictions['Openness'] = min(5.0, 
-            adjusted_predictions['Openness'] + diversity_boost)
+        openness_boost += min(0.7, diversity / 3)  # Up to 0.7 boost
     
-    # Genre stability affects Conscientiousness (more stable = more conscientious)
+    # Less consistency = more openness
+    if 'preference_correlation' in consistency_metrics:
+        correlation = consistency_metrics['preference_correlation']
+        openness_boost += (1 - correlation) * 0.6
+    
+    adjusted_predictions['Openness'] = min(5.0, max(1.0, 
+        adjusted_predictions['Openness'] + openness_boost))
+    
+    # CONSCIENTIOUSNESS: Pop music = higher conscientiousness, punk = lower
+    conscientiousness_adj = 0
+    if pop_score > 0.3 * max_count:  # Lots of mainstream pop
+        conscientiousness_adj += 0.6
+    if punk_score > 0.1 * max_count:  # Punk = anti-establishment
+        conscientiousness_adj -= 0.5
+    
+    # High stability = higher conscientiousness  
     if 'genre_stability' in consistency_metrics:
         stability = consistency_metrics['genre_stability']
-        stability_boost = stability * 0.3  # Max 0.3 boost
-        adjusted_predictions['Conscientiousness'] = min(5.0, max(1.0,
-            adjusted_predictions['Conscientiousness'] + stability_boost))
+        conscientiousness_adj += stability * 0.8  # Up to 0.8 boost
+    
+    adjusted_predictions['Conscientiousness'] = min(5.0, max(1.0,
+        adjusted_predictions['Conscientiousness'] + conscientiousness_adj))
+    
+    # EXTRAVERSION: Dance/Pop = higher, Alternative/Classical = lower
+    extraversion_adj = 0
+    dance_score = weighted_genre_counts.get('Dance', 0)
+    if dance_score > 0.1 * max_count or pop_score > 0.3 * max_count:
+        extraversion_adj += 0.7
+    if alternative_score > 0.3 * max_count or classical_score > 0.1 * max_count:
+        extraversion_adj -= 0.4
+    
+    adjusted_predictions['Extraversion'] = min(5.0, max(1.0,
+        adjusted_predictions['Extraversion'] + extraversion_adj))
+    
+    # NEUROTICISM: Alternative/emotional music = higher neuroticism
+    neuroticism_adj = 0
+    if alternative_score > 0.3 * max_count:
+        neuroticism_adj += 0.6
+    if punk_score > 0.1 * max_count:
+        neuroticism_adj += 0.5
+    # Low pop = higher neuroticism (less mainstream appeal)
+    if pop_score < 0.1 * max_count:
+        neuroticism_adj += 0.4
+    
+    adjusted_predictions['Neuroticism'] = min(5.0, max(1.0,
+        adjusted_predictions['Neuroticism'] + neuroticism_adj))
+    
+    # AGREEABLENESS: Pop = higher, punk/metal = lower
+    agreeableness_adj = 0
+    metal_score = weighted_genre_counts.get('Metal or Hardrock', 0)
+    if pop_score > 0.2 * max_count:
+        agreeableness_adj += 0.5
+    if punk_score > 0.1 * max_count or metal_score > 0.1 * max_count:
+        agreeableness_adj -= 0.6
+    
+    adjusted_predictions['Agreeableness'] = min(5.0, max(1.0,
+        adjusted_predictions['Agreeableness'] + agreeableness_adj))
     
     # Round results
     for trait in adjusted_predictions:
