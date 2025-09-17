@@ -173,7 +173,7 @@ def normalize_genres(raw_genres):
     return normalized
 
 def collect_spotify_data(sp):
-    """Collect and process Spotify data for our model"""
+    """Collect and process Spotify data with robust error handling"""
     
     progress = st.progress(0)
     status = st.empty()
@@ -211,20 +211,43 @@ def collect_spotify_data(sp):
     st.write(f"✅ Found {len(unique_tracks)} unique tracks")
     progress.progress(0.3)
     
-    # Step 2: Get audio features
+    # Step 2: Get audio features with robust error handling
     status.text("🎼 Analyzing audio characteristics...")
     track_ids = [track['id'] for track in unique_tracks]
     all_audio_features = []
     
-    # Get in batches
-    for i in range(0, len(track_ids), 100):
-        batch = track_ids[i:i+100]
-        try:
-            features = sp.audio_features(batch)
-            all_audio_features.extend([f for f in features if f])
-            time.sleep(0.1)
-        except Exception as e:
-            st.write(f"Error getting audio features: {e}")
+    # Try multiple batch sizes if needed
+    batch_sizes = [100, 50, 20, 10]
+    
+    for batch_size in batch_sizes:
+        if not track_ids:
+            break
+            
+        remaining_ids = track_ids.copy()
+        
+        for i in range(0, len(remaining_ids), batch_size):
+            batch = remaining_ids[i:i+batch_size]
+            try:
+                features = sp.audio_features(batch)
+                if features:
+                    valid_features = [f for f in features if f]
+                    all_audio_features.extend(valid_features)
+                    # Remove successful IDs
+                    successful_ids = [f['id'] for f in valid_features]
+                    track_ids = [tid for tid in track_ids if tid not in successful_ids]
+                time.sleep(0.1)
+            except Exception as e:
+                if "403" in str(e) or "429" in str(e):
+                    st.warning(f"API limit reached with batch size {batch_size}, trying smaller batches...")
+                    time.sleep(2)
+                    break
+                else:
+                    continue
+        
+        if not track_ids:  # All successful
+            break
+        elif batch_size == 10:  # Last attempt failed
+            st.warning(f"Could not get audio features for {len(track_ids)} tracks - will use fallback estimation")
     
     progress.progress(0.6)
     
@@ -263,15 +286,69 @@ def collect_spotify_data(sp):
         'genres': all_genres
     }
 
-def predict_personality(music_data, predictor):
-    """Use our working model to predict personality"""
+def create_fallback_audio_features(tracks, genres):
+    """Create estimated audio features when Spotify API fails"""
+    st.info("Creating estimated audio features from track metadata...")
     
-    if not music_data or not music_data['audio_features']:
-        st.error("No audio features available")
+    fallback_features = []
+    for track in tracks:
+        popularity = track.get('popularity', 50)
+        track_name = track['name'].lower()
+        artist_name = track['artists'][0]['name'].lower()
+        
+        # Estimate features based on genre and metadata
+        estimated = {
+            'danceability': 0.5,
+            'energy': 0.5,
+            'valence': 0.5,
+            'acousticness': 0.3,
+            'instrumentalness': 0.1,
+            'loudness': -10,
+            'speechiness': 0.1
+        }
+        
+        # Adjust based on genres
+        genre_text = ' '.join(genres).lower()
+        if any(term in genre_text for term in ['dance', 'electronic', 'edm', 'house']):
+            estimated['danceability'] = 0.8
+            estimated['energy'] = 0.8
+        if any(term in genre_text for term in ['rock', 'metal', 'punk']):
+            estimated['energy'] = 0.9
+            estimated['loudness'] = -5
+        if any(term in genre_text for term in ['acoustic', 'folk', 'classical']):
+            estimated['acousticness'] = 0.8
+            estimated['energy'] = 0.3
+        if any(term in genre_text for term in ['hip-hop', 'rap']):
+            estimated['speechiness'] = 0.4
+            estimated['energy'] = 0.7
+        
+        # Adjust based on track/artist names
+        if any(word in track_name for word in ['love', 'happy', 'good']):
+            estimated['valence'] = 0.7
+        if any(word in track_name for word in ['sad', 'dark', 'pain']):
+            estimated['valence'] = 0.3
+            
+        fallback_features.append(estimated)
+    
+    return fallback_features
+
+def predict_personality(music_data, predictor):
+    """Use our working model to predict personality with robust fallback"""
+    
+    # Try to use real audio features first, then fallback
+    if music_data['audio_features']:
+        st.success(f"Using {len(music_data['audio_features'])} real audio features")
+        audio_features = music_data['audio_features']
+    else:
+        st.warning("No audio features from Spotify - creating estimates from metadata")
+        audio_features = create_fallback_audio_features(music_data['tracks'], music_data['genres'])
+    
+    if not audio_features:
+        st.error("Could not create any audio features")
         return None
     
     # Calculate average audio features
-    audio_df = pd.DataFrame(music_data['audio_features'])
+    audio_df = pd.DataFrame(audio_features)
     
     spotify_features = {
         'danceability': audio_df['danceability'].mean(),
