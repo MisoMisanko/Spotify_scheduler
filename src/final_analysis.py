@@ -1,5 +1,3 @@
-# final_analysis.py - Complete dissertation analysis with correct file paths
-
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -271,20 +269,14 @@ def main():
     summary = compare_results(kaggle_results, per_results)
     
     print(f"\n" + "="*60)
-    print("ANALYSIS COMPLETE - DISSERTATION READY")
+    print("ANALYSIS COMPLETE")
     print("="*60)
     
     if summary:
         print(f"Key findings:")
         print(f"- Maximum R²: {summary['max_r2']:.3f}")
         print(f"- Effect interpretation: {summary['interpretation'].title()}")
-        print(f"- Academic contribution: Methodological replication/comparison")
-    
-    print(f"\nYour dissertation now has:")
-    print(f"- Working analysis with real data")
-    print(f"- Legitimate academic results")
-    print(f"- Proper literature context")
-    print(f"- Honest limitations discussion")
+
 
 if __name__ == "__main__":
     main()

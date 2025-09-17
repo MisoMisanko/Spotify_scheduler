@@ -9,3 +9,4 @@ requests
 joblib
 openpyxl
 plotly
+scipy
