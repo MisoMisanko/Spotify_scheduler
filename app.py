@@ -324,48 +324,86 @@ def collect_listening_data(sp):
     }
 
 def analyze_listening_consistency(listening_data, genres_by_period):
-    """Analyze consistency in listening patterns over time"""
+    """Analyze consistency in listening patterns over time with robust error handling"""
     
     consistency_metrics = {}
     
     # Calculate genre distributions for each period
     distributions = {}
     for period, genres in genres_by_period.items():
-        if genres:
+        if genres and len(genres) > 0:
             genre_counts = Counter(genres)
             total = sum(genre_counts.values())
             distributions[period] = {genre: count/total for genre, count in genre_counts.items()}
         else:
             distributions[period] = {}
     
-    # Compare short vs long term consistency
-    if distributions['short_term'] and distributions['long_term']:
+    # Find the best periods to compare (fallback if short_term is empty)
+    available_periods = [period for period, dist in distributions.items() if dist]
+    
+    if len(available_periods) < 2:
+        # Not enough data for consistency analysis - use defaults
+        st.warning("Limited listening history - using default consistency metrics")
+        consistency_metrics['genre_stability'] = 0.5  # Neutral
+        consistency_metrics['preference_correlation'] = 0.5  # Neutral
+        # Still calculate diversity for available periods
+        for period, dist in distributions.items():
+            if dist:
+                probs = list(dist.values())
+                diversity = -sum(p * np.log(p) for p in probs if p > 0)
+                consistency_metrics[f'{period}_diversity'] = diversity
+        return consistency_metrics
+    
+    # Try short vs long term first, then fallback to available periods
+    primary_period = 'short_term' if distributions.get('short_term') else available_periods[0]
+    secondary_period = 'long_term' if distributions.get('long_term') else available_periods[-1]
+    
+    # Make sure we have two different periods
+    if primary_period == secondary_period and len(available_periods) > 1:
+        secondary_period = [p for p in available_periods if p != primary_period][0]
+    
+    # Compare the two best available periods
+    if distributions[primary_period] and distributions[secondary_period]:
         # Calculate overlap
-        short_genres = set(distributions['short_term'].keys())
-        long_genres = set(distributions['long_term'].keys())
+        primary_genres = set(distributions[primary_period].keys())
+        secondary_genres = set(distributions[secondary_period].keys())
         
-        overlap = len(short_genres & long_genres)
-        total_unique = len(short_genres | long_genres)
+        overlap = len(primary_genres & secondary_genres)
+        total_unique = len(primary_genres | secondary_genres)
         
         consistency_metrics['genre_stability'] = overlap / total_unique if total_unique > 0 else 0
         
         # Calculate correlation of preferences
-        common_genres = short_genres & long_genres
+        common_genres = primary_genres & secondary_genres
         if len(common_genres) >= 3:
-            short_prefs = [distributions['short_term'][g] for g in common_genres]
-            long_prefs = [distributions['long_term'][g] for g in common_genres]
-            correlation = np.corrcoef(short_prefs, long_prefs)[0,1]
-            consistency_metrics['preference_correlation'] = correlation if not np.isnan(correlation) else 0
+            try:
+                primary_prefs = [distributions[primary_period][g] for g in common_genres]
+                secondary_prefs = [distributions[secondary_period][g] for g in common_genres]
+                correlation = np.corrcoef(primary_prefs, secondary_prefs)[0,1]
+                consistency_metrics['preference_correlation'] = correlation if not np.isnan(correlation) else 0
+            except Exception:
+                consistency_metrics['preference_correlation'] = 0
         else:
             consistency_metrics['preference_correlation'] = 0
+    else:
+        # Fallback defaults if comparison fails
+        consistency_metrics['genre_stability'] = 0.5
+        consistency_metrics['preference_correlation'] = 0.5
     
-    # Calculate diversity metrics
+    # Calculate diversity metrics for all available periods
     for period, dist in distributions.items():
-        if dist:
-            # Shannon diversity index
-            probs = list(dist.values())
-            diversity = -sum(p * np.log(p) for p in probs if p > 0)
-            consistency_metrics[f'{period}_diversity'] = diversity
+        if dist and len(dist) > 0:
+            try:
+                # Shannon diversity index
+                probs = list(dist.values())
+                diversity = -sum(p * np.log(p) for p in probs if p > 0)
+                consistency_metrics[f'{period}_diversity'] = diversity
+            except Exception:
+                consistency_metrics[f'{period}_diversity'] = 1.0  # Default moderate diversity
+    
+    # Ensure we have at least some diversity metric
+    if not any(key.endswith('_diversity') for key in consistency_metrics):
+        consistency_metrics['medium_term_diversity'] = 1.5  # Default
     
     return consistency_metrics
 
