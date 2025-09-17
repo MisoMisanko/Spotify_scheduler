@@ -50,7 +50,7 @@ The project has two main components:
 1.  Clone this repository:
 
     ``` bash
-    git clone https://github.com/your-username/SPOTIFY_SCHEDULER.git
+    git clone https://github.com/MisoMisanko/Spotify_scheduler.git
     cd SPOTIFY_SCHEDULER
     ```
 
