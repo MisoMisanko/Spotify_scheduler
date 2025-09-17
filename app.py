@@ -1,4 +1,4 @@
-# app.py - Working Spotify Personality Predictor
+# app.py - Fixed Spotify Personality Predictor - Genre Focused
 import os
 import time
 import streamlit as st
@@ -9,6 +9,9 @@ import numpy as np
 import plotly.graph_objects as go
 from production_predictor import PersonalityPredictor
 import requests
+from collections import Counter, defaultdict
+import asyncio
+from datetime import datetime, timedelta
 
 # Spotify credentials
 SCOPES = (
@@ -30,7 +33,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize the ONLY model we use
 @st.cache_resource
 def load_personality_predictor():
     """Load the working production model"""
@@ -42,7 +44,6 @@ def load_personality_predictor():
         st.sidebar.error(f"❌ Failed to load model: {e}")
         return None
 
-# Keep your working authentication (unchanged)
 def ensure_spotify_client():
     """Fixed authentication using session-specific cache files"""
     
@@ -115,358 +116,489 @@ def ensure_spotify_client():
     st.markdown(f"[🎵 Log in with Spotify]({login_url})")
     st.stop()
 
-def get_lastfm_genres(artist_name):
-    """Get genres from Last.fm and normalize them"""
-    if not LASTFM_API_KEY:
+class GenreEnricher:
+    """Robust genre enrichment using multiple sources"""
+    
+    def __init__(self, lastfm_key=None):
+        self.lastfm_key = lastfm_key
+        self.artist_cache = {}
+        
+        # Expanded genre mapping for normalization
+        self.genre_mapping = {
+            'Dance': ['dance', 'electronic', 'edm', 'house', 'techno', 'disco', 'club', 'electro', 'electronica'],
+            'Rock': ['rock', 'hard rock', 'classic rock', 'indie rock', 'alternative rock', 'rock and roll', 'soft rock'],
+            'Pop': ['pop', 'mainstream', 'chart', 'radio', 'teen pop', 'dance pop', 'synthpop', 'electropop'],
+            'Metal or Hardrock': ['metal', 'heavy metal', 'death metal', 'black metal', 'hardrock', 'metalcore', 'doom metal'],
+            'Classical music': ['classical', 'orchestra', 'symphony', 'baroque', 'romantic', 'contemporary classical', 'chamber music'],
+            'Swing, Jazz': ['jazz', 'blues', 'swing', 'bebop', 'smooth jazz', 'acid jazz', 'fusion', 'big band'],
+            'Folk': ['folk', 'acoustic', 'singer-songwriter', 'indie folk', 'folk rock', 'traditional folk'],
+            'Country': ['country', 'bluegrass', 'americana', 'alt-country', 'outlaw country', 'contemporary country'],
+            'Hiphop, Rap': ['hip-hop', 'rap', 'hip hop', 'trap', 'gangsta rap', 'conscious rap', 'old school rap'],
+            'Punk': ['punk', 'punk rock', 'hardcore punk', 'pop punk', 'post-punk', 'ska punk'],
+            'Alternative': ['alternative', 'indie', 'grunge', 'shoegaze', 'britpop', 'post-rock', 'art rock'],
+            'Latino': ['latin', 'latino', 'reggaeton', 'salsa', 'bachata', 'cumbia', 'bossa nova', 'tango', 'flamenco'],
+            'Reggae, Ska': ['reggae', 'ska', 'dub', 'roots reggae', 'dancehall', 'ragga'],
+            'Opera': ['opera', 'operatic', 'vocal', 'art song', 'classical vocal'],
+            'Musical': ['musical', 'theatre', 'broadway', 'show tunes', 'soundtrack'],
+            'Techno, Trance': ['techno', 'trance', 'progressive', 'ambient electronic', 'minimal techno', 'psytrance'],
+            'Rock n roll': ['rock n roll', 'rockabilly', 'doo-wop', '50s rock', 'early rock'],
+            'Slow songs or fast songs': ['ballad', 'slow', 'mellow', 'chill', 'downtempo'],
+            'Music': ['instrumental', 'world music', 'new age', 'ambient', 'experimental']
+        }
+    
+    def get_lastfm_tags(self, artist_name):
+        """Get tags from Last.fm with better error handling"""
+        if not self.lastfm_key or artist_name in self.artist_cache:
+            return self.artist_cache.get(artist_name, [])
+        
+        try:
+            url = "http://ws.audioscrobbler.com/2.0/"
+            params = {
+                'method': 'artist.gettoptags',
+                'artist': artist_name,
+                'api_key': self.lastfm_key,
+                'format': 'json',
+                'limit': 10  # Get more tags
+            }
+            
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if 'toptags' in data and 'tag' in data['toptags']:
+                    tags = [tag['name'].lower().strip() for tag in data['toptags']['tag']]
+                    normalized = self.normalize_genres(tags)
+                    self.artist_cache[artist_name] = normalized
+                    return normalized
+        except Exception as e:
+            st.write(f"Last.fm error for {artist_name}: {e}")
+        
+        self.artist_cache[artist_name] = []
         return []
     
-    try:
-        url = "http://ws.audioscrobbler.com/2.0/"
-        params = {
-            'method': 'artist.gettoptags',
-            'artist': artist_name,
-            'api_key': LASTFM_API_KEY,
-            'format': 'json',
-            'limit': 5
-        }
+    def get_musicbrainz_tags(self, artist_name):
+        """Get tags from MusicBrainz as fallback"""
+        try:
+            # Search for artist
+            search_url = f"https://musicbrainz.org/ws/2/artist/?query={artist_name}&fmt=json&limit=1"
+            headers = {'User-Agent': 'SpotifyPersonalityApp/1.0 (research@university.edu)'}
+            
+            response = requests.get(search_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                artists = data.get('artists', [])
+                if artists:
+                    artist_id = artists[0]['id']
+                    
+                    # Get detailed info with tags
+                    detail_url = f"https://musicbrainz.org/ws/2/artist/{artist_id}?inc=tags&fmt=json"
+                    time.sleep(1.1)  # Respect rate limit
+                    
+                    detail_response = requests.get(detail_url, headers=headers, timeout=5)
+                    if detail_response.status_code == 200:
+                        detail_data = detail_response.json()
+                        tags = detail_data.get('tags', [])
+                        tag_names = [tag['name'].lower().strip() for tag in tags if tag.get('count', 0) > 0]
+                        return self.normalize_genres(tag_names)
+        except Exception as e:
+            st.write(f"MusicBrainz error for {artist_name}: {e}")
         
-        response = requests.get(url, params=params, timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            if 'toptags' in data and 'tag' in data['toptags']:
-                tags = [tag['name'].lower() for tag in data['toptags']['tag']]
-                return normalize_genres(tags)
-    except:
-        pass
-    return []
+        return []
+    
+    def normalize_genres(self, raw_genres):
+        """Convert raw genre tags to the 19 genres our model expects"""
+        normalized = []
+        raw_text = ' '.join(raw_genres).lower()
+        
+        for model_genre, keywords in self.genre_mapping.items():
+            if any(keyword in raw_text for keyword in keywords):
+                normalized.append(model_genre)
+        
+        return list(set(normalized))  # Remove duplicates
+    
+    def enrich_artist_genres(self, artists_data):
+        """Enrich artist data with genres from multiple sources"""
+        enriched_genres = []
+        
+        for artist in artists_data:
+            artist_name = artist['name']
+            
+            # Start with Spotify genres
+            spotify_genres = self.normalize_genres(artist.get('genres', []))
+            all_genres = spotify_genres.copy()
+            
+            # Add Last.fm tags if available
+            if self.lastfm_key:
+                lastfm_tags = self.get_lastfm_tags(artist_name)
+                all_genres.extend(lastfm_tags)
+                time.sleep(0.2)  # Rate limiting
+            
+            # Use MusicBrainz as fallback if we have few genres
+            if len(set(all_genres)) < 2:
+                mb_tags = self.get_musicbrainz_tags(artist_name)
+                all_genres.extend(mb_tags)
+            
+            enriched_genres.extend(all_genres)
+        
+        return enriched_genres
 
-def normalize_genres(raw_genres):
-    """Convert raw genre tags to the 19 genres our model expects"""
-    
-    # Map various genre terms to our model's expected genres
-    genre_mapping = {
-        'Dance': ['dance', 'electronic', 'edm', 'house', 'techno', 'disco', 'club'],
-        'Rock': ['rock', 'hard rock', 'classic rock', 'indie rock', 'alternative rock'],
-        'Pop': ['pop', 'mainstream', 'chart', 'radio', 'teen pop', 'dance pop'],
-        'Metal or Hardrock': ['metal', 'heavy metal', 'death metal', 'black metal', 'hardrock'],
-        'Classical music': ['classical', 'orchestra', 'symphony', 'baroque', 'romantic'],
-        'Jazz': ['jazz', 'blues', 'swing', 'bebop', 'smooth jazz'],
-        'Folk': ['folk', 'acoustic', 'singer-songwriter', 'indie folk'],
-        'Country': ['country', 'bluegrass', 'americana', 'alt-country'],
-        'Hiphop, Rap': ['hip-hop', 'rap', 'hip hop', 'trap', 'gangsta rap'],
-        'Punk': ['punk', 'punk rock', 'hardcore punk', 'pop punk'],
-        'Alternative': ['alternative', 'indie', 'grunge', 'shoegaze'],
-        'Latino': ['latin', 'latino', 'reggaeton', 'salsa', 'bachata', 'cumbia'],
-        'Reggae, Ska': ['reggae', 'ska', 'dub', 'roots reggae'],
-        'Opera': ['opera', 'operatic', 'vocal', 'art song'],
-        'Musical': ['musical', 'theatre', 'broadway', 'show tunes'],
-        'Techno, Trance': ['techno', 'trance', 'progressive', 'ambient electronic']
-    }
-    
-    normalized = []
-    raw_text = ' '.join(raw_genres).lower()
-    
-    for model_genre, keywords in genre_mapping.items():
-        if any(keyword in raw_text for keyword in keywords):
-            normalized.append(model_genre)
-    
-    return normalized
-
-def collect_spotify_data(sp):
-    """Collect and process Spotify data with robust error handling"""
+def collect_listening_data(sp):
+    """Collect listening data with temporal analysis"""
     
     progress = st.progress(0)
     status = st.empty()
     
-    # Step 1: Get tracks
-    status.text("🎵 Fetching your music library...")
-    all_tracks = []
+    listening_data = {
+        'short_term': [],    # Last 4 weeks
+        'medium_term': [],   # Last 6 months  
+        'long_term': [],     # Last 2 years
+        'recent': []         # Last 50 tracks
+    }
     
-    for time_range in ['short_term', 'medium_term', 'long_term']:
+    # Step 1: Get tracks from different time periods
+    status.text("🎵 Fetching listening history across time periods...")
+    
+    time_ranges = ['short_term', 'medium_term', 'long_term']
+    for i, time_range in enumerate(time_ranges):
         try:
-            tracks = sp.current_user_top_tracks(limit=50, time_range=time_range)
-            all_tracks.extend(tracks['items'])
+            tracks_response = sp.current_user_top_tracks(limit=50, time_range=time_range)
+            tracks = tracks_response['items']
+            listening_data[time_range] = tracks
+            st.write(f"✅ {time_range}: {len(tracks)} tracks")
         except Exception as e:
             st.write(f"Could not get {time_range} tracks: {e}")
+        
+        progress.progress((i + 1) / 5)
+        time.sleep(0.1)
     
-    # Get recent tracks
+    # Get recent tracks with timestamps
     try:
-        recent = sp.current_user_recently_played(limit=50)
-        all_tracks.extend([item['track'] for item in recent['items']])
+        recent_response = sp.current_user_recently_played(limit=50)
+        listening_data['recent'] = [item['track'] for item in recent_response['items']]
+        st.write(f"✅ Recent: {len(listening_data['recent'])} tracks")
     except Exception as e:
         st.write(f"Could not get recent tracks: {e}")
     
-    if not all_tracks:
-        st.error("No tracks found!")
-        return None
+    progress.progress(0.8)
     
-    # Remove duplicates
-    unique_tracks = []
-    seen_ids = set()
+    # Step 2: Extract unique artists across all periods
+    status.text("🎤 Collecting artist information...")
+    
+    all_tracks = []
+    for period_tracks in listening_data.values():
+        all_tracks.extend(period_tracks)
+    
+    # Get unique artists
+    unique_artists = {}
     for track in all_tracks:
-        if track['id'] and track['id'] not in seen_ids:
-            unique_tracks.append(track)
-            seen_ids.add(track['id'])
+        if track and track.get('artists'):
+            artist = track['artists'][0]
+            artist_id = artist['id']
+            if artist_id and artist_id not in unique_artists:
+                unique_artists[artist_id] = {
+                    'id': artist_id,
+                    'name': artist['name']
+                }
     
-    st.write(f"✅ Found {len(unique_tracks)} unique tracks")
-    progress.progress(0.3)
+    st.write(f"✅ Found {len(unique_artists)} unique artists")
     
-    # Step 2: Get audio features with robust error handling
-    status.text("🎼 Analyzing audio characteristics...")
-    track_ids = [track['id'] for track in unique_tracks]
-    all_audio_features = []
+    # Step 3: Get artist details with genres (batch processing)
+    artist_details = []
+    artist_ids = list(unique_artists.keys())
     
-    # Try multiple batch sizes if needed
-    batch_sizes = [100, 50, 20, 10]
-    
-    for batch_size in batch_sizes:
-        if not track_ids:
-            break
-            
-        remaining_ids = track_ids.copy()
-        
-        for i in range(0, len(remaining_ids), batch_size):
-            batch = remaining_ids[i:i+batch_size]
-            try:
-                features = sp.audio_features(batch)
-                if features:
-                    valid_features = [f for f in features if f]
-                    all_audio_features.extend(valid_features)
-                    # Remove successful IDs
-                    successful_ids = [f['id'] for f in valid_features]
-                    track_ids = [tid for tid in track_ids if tid not in successful_ids]
-                time.sleep(0.1)
-            except Exception as e:
-                if "403" in str(e) or "429" in str(e):
-                    st.warning(f"API limit reached with batch size {batch_size}, trying smaller batches...")
-                    time.sleep(2)
-                    break
-                else:
-                    continue
-        
-        if not track_ids:  # All successful
-            break
-        elif batch_size == 10:  # Last attempt failed
-            st.warning(f"Could not get audio features for {len(track_ids)} tracks - will use fallback estimation")
-    
-    progress.progress(0.6)
-    
-    # Step 3: Get and normalize genres
-    status.text("🏷️ Identifying genres...")
-    all_genres = []
-    
-    # Get Spotify genres
-    artist_ids = list(set([track['artists'][0]['id'] for track in unique_tracks[:100]]))
     for i in range(0, len(artist_ids), 50):
         batch = artist_ids[i:i+50]
         try:
-            artists = sp.artists(batch)
-            for artist in artists['artists']:
-                raw_genres = artist.get('genres', [])
-                all_genres.extend(normalize_genres(raw_genres))
-            time.sleep(0.1)
+            artists_response = sp.artists(batch)
+            artist_details.extend(artists_response['artists'])
+            time.sleep(0.1)  # Rate limiting
         except Exception as e:
-            st.write(f"Error getting artist info: {e}")
-    
-    # Enrich with Last.fm (sample to avoid rate limits)
-    if LASTFM_API_KEY:
-        sample_artists = unique_tracks[:20]  # Limit to 20 to avoid timeout
-        for track in sample_artists:
-            artist_name = track['artists'][0]['name']
-            lastfm_genres = get_lastfm_genres(artist_name)
-            all_genres.extend(lastfm_genres)
-            time.sleep(0.1)
+            st.write(f"Error getting artist batch: {e}")
     
     progress.progress(1.0)
     status.text("✅ Data collection complete!")
     
     return {
-        'tracks': unique_tracks,
-        'audio_features': all_audio_features,
-        'genres': all_genres
+        'listening_periods': listening_data,
+        'artists': artist_details,
+        'unique_tracks': len(all_tracks)
     }
 
-def create_fallback_audio_features(tracks, genres):
-    """Create estimated audio features when Spotify API fails"""
-    st.info("Creating estimated audio features from track metadata...")
+def analyze_listening_consistency(listening_data, genres_by_period):
+    """Analyze consistency in listening patterns over time"""
     
-    fallback_features = []
-    for track in tracks:
-        popularity = track.get('popularity', 50)
-        track_name = track['name'].lower()
-        artist_name = track['artists'][0]['name'].lower()
-        
-        # Estimate features based on genre and metadata
-        estimated = {
-            'danceability': 0.5,
-            'energy': 0.5,
-            'valence': 0.5,
-            'acousticness': 0.3,
-            'instrumentalness': 0.1,
-            'loudness': -10,
-            'speechiness': 0.1
-        }
-        
-        # Adjust based on genres
-        genre_text = ' '.join(genres).lower()
-        if any(term in genre_text for term in ['dance', 'electronic', 'edm', 'house']):
-            estimated['danceability'] = 0.8
-            estimated['energy'] = 0.8
-        if any(term in genre_text for term in ['rock', 'metal', 'punk']):
-            estimated['energy'] = 0.9
-            estimated['loudness'] = -5
-        if any(term in genre_text for term in ['acoustic', 'folk', 'classical']):
-            estimated['acousticness'] = 0.8
-            estimated['energy'] = 0.3
-        if any(term in genre_text for term in ['hip-hop', 'rap']):
-            estimated['speechiness'] = 0.4
-            estimated['energy'] = 0.7
-        
-        # Adjust based on track/artist names
-        if any(word in track_name for word in ['love', 'happy', 'good']):
-            estimated['valence'] = 0.7
-        if any(word in track_name for word in ['sad', 'dark', 'pain']):
-            estimated['valence'] = 0.3
-            
-        fallback_features.append(estimated)
+    consistency_metrics = {}
     
-    return fallback_features
+    # Calculate genre distributions for each period
+    distributions = {}
+    for period, genres in genres_by_period.items():
+        if genres:
+            genre_counts = Counter(genres)
+            total = sum(genre_counts.values())
+            distributions[period] = {genre: count/total for genre, count in genre_counts.items()}
+        else:
+            distributions[period] = {}
+    
+    # Compare short vs long term consistency
+    if distributions['short_term'] and distributions['long_term']:
+        # Calculate overlap
+        short_genres = set(distributions['short_term'].keys())
+        long_genres = set(distributions['long_term'].keys())
+        
+        overlap = len(short_genres & long_genres)
+        total_unique = len(short_genres | long_genres)
+        
+        consistency_metrics['genre_stability'] = overlap / total_unique if total_unique > 0 else 0
+        
+        # Calculate correlation of preferences
+        common_genres = short_genres & long_genres
+        if len(common_genres) >= 3:
+            short_prefs = [distributions['short_term'][g] for g in common_genres]
+            long_prefs = [distributions['long_term'][g] for g in common_genres]
+            correlation = np.corrcoef(short_prefs, long_prefs)[0,1]
+            consistency_metrics['preference_correlation'] = correlation if not np.isnan(correlation) else 0
+        else:
+            consistency_metrics['preference_correlation'] = 0
+    
+    # Calculate diversity metrics
+    for period, dist in distributions.items():
+        if dist:
+            # Shannon diversity index
+            probs = list(dist.values())
+            diversity = -sum(p * np.log(p) for p in probs if p > 0)
+            consistency_metrics[f'{period}_diversity'] = diversity
+    
+    return consistency_metrics
 
-def predict_personality(music_data, predictor):
-    """Use our working model to predict personality with robust fallback"""
+def predict_personality_from_genres(genre_data, consistency_metrics, predictor):
+    """Predict personality directly from genre preferences with consistency adjustments"""
     
-    # Try to use real audio features first, then fallback
-    if music_data['audio_features']:
-        st.success(f"Using {len(music_data['audio_features'])} real audio features")
-        audio_features = music_data['audio_features']
-    else:
-        st.warning("No audio features from Spotify - creating estimates from metadata")
-        audio_features = create_fallback_audio_features(music_data['tracks'], music_data['genres'])
+    # Calculate overall genre preferences (weighted by recency)
+    all_genres = []
     
-    if not audio_features:
-        st.error("Could not create any audio features")
-        return None
-    
-    # Calculate average audio features
-    audio_df = pd.DataFrame(audio_features)
-    
-    spotify_features = {
-        'danceability': audio_df['danceability'].mean(),
-        'energy': audio_df['energy'].mean(), 
-        'valence': audio_df['valence'].mean(),
-        'acousticness': audio_df['acousticness'].mean(),
-        'instrumentalness': audio_df['instrumentalness'].mean(),
-        'loudness': audio_df['loudness'].mean(),
-        'speechiness': audio_df['speechiness'].mean()
+    # Weight recent listening more heavily
+    weights = {
+        'short_term': 0.4,   # Recent preferences matter most
+        'medium_term': 0.3,  # Medium term shows patterns
+        'long_term': 0.2,    # Long term shows core taste
+        'recent': 0.1        # Very recent might be situational
     }
     
-    # Show music profile
-    st.write("### 🎵 Your Music Profile")
-    col1, col2, col3, col4 = st.columns(4)
+    weighted_genre_counts = defaultdict(float)
+    total_weight = 0
     
-    with col1:
-        st.metric("Danceability", f"{spotify_features['danceability']:.2f}")
-        st.metric("Energy", f"{spotify_features['energy']:.2f}")
-    with col2:
-        st.metric("Valence", f"{spotify_features['valence']:.2f}")
-        st.metric("Acousticness", f"{spotify_features['acousticness']:.2f}")
-    with col3:
-        st.metric("Speechiness", f"{spotify_features['speechiness']:.2f}")
-        st.metric("Instrumentalness", f"{spotify_features['instrumentalness']:.2f}")
-    with col4:
-        st.metric("Loudness", f"{spotify_features['loudness']:.1f} dB")
-        unique_genres = len(set(music_data['genres']))
-        st.metric("Unique Genres", unique_genres)
+    for period, genres in genre_data.items():
+        weight = weights.get(period, 0.1)
+        for genre in genres:
+            weighted_genre_counts[genre] += weight
+            total_weight += weight
     
-    # Get predictions
-    try:
-        predictions = predictor.predict_from_spotify_features(spotify_features)
+    # Normalize to get preferences on 1-5 scale
+    genre_preferences = {}
+    
+    # Get all expected genres for the model
+    expected_genres = [
+        'Music', 'Slow songs or fast songs', 'Dance', 'Folk', 'Country',
+        'Classical music', 'Musical', 'Pop', 'Rock', 'Metal or Hardrock',
+        'Punk', 'Hiphop, Rap', 'Reggae, Ska', 'Swing, Jazz', 'Rock n roll',
+        'Alternative', 'Latino', 'Techno, Trance', 'Opera'
+    ]
+    
+    # Calculate preferences (1-5 scale)
+    max_count = max(weighted_genre_counts.values()) if weighted_genre_counts else 1
+    
+    for genre in expected_genres:
+        if genre in weighted_genre_counts:
+            # Scale to 1-5 based on relative preference
+            raw_pref = weighted_genre_counts[genre] / max_count
+            # Map to 1-5 scale (1=don't like, 5=love)
+            preference = 1 + (raw_pref * 4)
+        else:
+            # Neutral preference for unheard genres
+            preference = 3.0
         
-        if 'error' in predictions:
-            st.error(f"Prediction failed: {predictions['error']}")
-            return None
-        
-        return predictions
-        
-    except Exception as e:
-        st.error(f"Prediction error: {e}")
-        return None
+        genre_preferences[genre] = preference
+    
+    # Get base predictions
+    base_predictions = predictor.predict_from_genres(genre_preferences)
+    
+    if 'error' in base_predictions:
+        return base_predictions
+    
+    # Adjust predictions based on listening consistency
+    adjusted_predictions = base_predictions.copy()
+    
+    # Consistency affects Openness (less consistent = more open)
+    if 'preference_correlation' in consistency_metrics:
+        correlation = consistency_metrics['preference_correlation']
+        openness_adjustment = (1 - correlation) * 0.5  # Max 0.5 point adjustment
+        adjusted_predictions['Openness'] = min(5.0, max(1.0, 
+            adjusted_predictions['Openness'] + openness_adjustment))
+    
+    # Diversity affects Openness positively
+    if 'short_term_diversity' in consistency_metrics:
+        diversity = consistency_metrics['short_term_diversity']
+        # Normalize diversity (typical range 0-3, high diversity = high openness)
+        diversity_boost = min(0.5, diversity / 6)  # Max 0.5 boost
+        adjusted_predictions['Openness'] = min(5.0, 
+            adjusted_predictions['Openness'] + diversity_boost)
+    
+    # Genre stability affects Conscientiousness (more stable = more conscientious)
+    if 'genre_stability' in consistency_metrics:
+        stability = consistency_metrics['genre_stability']
+        stability_boost = stability * 0.3  # Max 0.3 boost
+        adjusted_predictions['Conscientiousness'] = min(5.0, max(1.0,
+            adjusted_predictions['Conscientiousness'] + stability_boost))
+    
+    # Round results
+    for trait in adjusted_predictions:
+        adjusted_predictions[trait] = round(adjusted_predictions[trait], 2)
+    
+    return adjusted_predictions, consistency_metrics
 
-def display_results(predictions, predictor):
-    """Display personality results"""
+def display_results(predictions, consistency_metrics, genre_data, predictor):
+    """Display comprehensive personality results with listening analysis"""
     
     st.header("🎭 Your Musical Personality")
     
-    # Radar chart
-    traits = list(predictions.keys())
-    scores = list(predictions.values())
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=scores,
-        theta=traits,
-        fill='toself',
-        name='Your Personality'
-    ))
-    
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[1, 5])),
-        showlegend=False,
-        title="Big Five Personality Traits (1-5 scale)",
-        height=400
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Individual traits
-    trait_descriptions = {
-        'Openness': 'Creativity, curiosity, and openness to new experiences',
-        'Conscientiousness': 'Organization, discipline, and goal-oriented behavior', 
-        'Extraversion': 'Sociability, energy, and positive emotions',
-        'Agreeableness': 'Compassion, cooperation, and trust in others',
-        'Neuroticism': 'Emotional instability and tendency toward negative emotions'
-    }
-    
-    for trait, score in predictions.items():
-        level = "High" if score >= 3.5 else "Low" if score <= 2.5 else "Moderate"
+    # Show consistency insights first
+    if consistency_metrics:
+        st.subheader("🔄 Your Listening Patterns")
+        col1, col2, col3 = st.columns(3)
         
-        with st.expander(f"**{trait}**: {score:.2f}/5.0 ({level})"):
-            st.write(f"**What this measures:** {trait_descriptions.get(trait, 'Personality dimension')}")
-            st.progress(score / 5.0)
+        with col1:
+            stability = consistency_metrics.get('genre_stability', 0)
+            st.metric("Genre Stability", f"{stability:.2%}")
             
-            if score >= 3.5:
-                st.info(f"You score high on {trait}")
-            elif score <= 2.5:
-                st.info(f"You score low on {trait}")
-            else:
-                st.info(f"You score moderately on {trait}")
+        with col2:
+            correlation = consistency_metrics.get('preference_correlation', 0)
+            st.metric("Preference Consistency", f"{correlation:.2f}")
+            
+        with col3:
+            diversity = consistency_metrics.get('short_term_diversity', 0)
+            st.metric("Recent Diversity", f"{diversity:.2f}")
+        
+        # Consistency insights
+        with st.expander("What does this mean?"):
+            st.write(f"""
+            **Genre Stability ({stability:.1%})**: How much your favorite genres overlap between recent and long-term listening.
+            
+            **Preference Consistency ({correlation:.2f})**: How similar your current preferences are to your historical patterns.
+            
+            **Recent Diversity ({diversity:.2f})**: How varied your recent listening has been across genres.
+            
+            These patterns influenced your personality predictions, especially Openness and Conscientiousness.
+            """)
+    
+    # Radar chart
+    if isinstance(predictions, dict) and 'error' not in predictions:
+        traits = list(predictions.keys())
+        scores = list(predictions.values())
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(
+            r=scores,
+            theta=traits,
+            fill='toself',
+            name='Your Personality'
+        ))
+        
+        fig.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[1, 5])),
+            showlegend=False,
+            title="Big Five Personality Traits (1-5 scale)",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Individual traits with explanations
+        trait_descriptions = {
+            'Openness': 'Creativity, curiosity, and openness to new experiences',
+            'Conscientiousness': 'Organization, discipline, and goal-oriented behavior', 
+            'Extraversion': 'Sociability, energy, and positive emotions',
+            'Agreeableness': 'Compassion, cooperation, and trust in others',
+            'Neuroticism': 'Emotional instability and tendency toward negative emotions'
+        }
+        
+        for trait, score in predictions.items():
+            level = "High" if score >= 3.5 else "Low" if score <= 2.5 else "Moderate"
+            
+            with st.expander(f"**{trait}**: {score:.2f}/5.0 ({level})"):
+                st.write(f"**What this measures:** {trait_descriptions.get(trait, 'Personality dimension')}")
+                st.progress(score / 5.0)
+                
+                # Show how consistency affected this trait
+                if trait == 'Openness' and consistency_metrics:
+                    corr = consistency_metrics.get('preference_correlation', 0)
+                    div = consistency_metrics.get('short_term_diversity', 0)
+                    st.info(f"Influenced by listening diversity ({div:.2f}) and consistency ({corr:.2f})")
+                elif trait == 'Conscientiousness' and consistency_metrics:
+                    stability = consistency_metrics.get('genre_stability', 0)
+                    st.info(f"Influenced by genre stability over time ({stability:.1%})")
+    
+    # Show genre analysis
+    st.subheader("🎼 Your Musical Taste Analysis")
+    
+    # Combine all genres for analysis
+    all_found_genres = []
+    for period_genres in genre_data.values():
+        all_found_genres.extend(period_genres)
+    
+    if all_found_genres:
+        genre_counts = Counter(all_found_genres)
+        top_genres = genre_counts.most_common(10)
+        
+        st.write("**Top Genres Detected:**")
+        st.write(", ".join([f"{genre} ({count})" for genre, count in top_genres]))
+        
+        # Show temporal differences
+        st.write("**Genre Evolution:**")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Recent Favorites:**")
+            recent_genres = Counter(genre_data.get('short_term', []))
+            for genre, count in recent_genres.most_common(5):
+                st.write(f"- {genre}: {count}")
+        
+        with col2:
+            st.write("**Long-term Favorites:**")
+            longterm_genres = Counter(genre_data.get('long_term', []))
+            for genre, count in longterm_genres.most_common(5):
+                st.write(f"- {genre}: {count}")
+    else:
+        st.warning("No genres detected. This might affect prediction accuracy.")
 
 def main():
     st.title("🎵 Spotify Personality Predictor")
-    st.markdown("### Discover your Big Five personality traits from your music!")
+    st.markdown("### Discover your Big Five personality traits from your music listening patterns!")
     
-    # Load our working model
+    # Load model
     predictor = load_personality_predictor()
     if not predictor:
-        st.error("Could not load personality model. Check if production_personality_models.pkl exists in models/ folder.")
+        st.error("Could not load personality model.")
         st.stop()
     
     # Sidebar info
     with st.sidebar:
-        st.header("How It Works")
+        st.header("Enhanced Analysis")
         st.write("""
-        1. **Analyzes** your Spotify listening history
-        2. **Extracts** audio features and genres  
-        3. **Maps** them to personality patterns
-        4. **Predicts** your Big Five traits
+        **New Features:**
+        - Direct genre-based prediction
+        - Listening consistency analysis
+        - Temporal pattern recognition
+        - Multi-source genre enrichment
         
-        Based on research with 1,010 participants.
+        **Data Sources:**
+        - Spotify artist genres
+        - Last.fm community tags
+        - MusicBrainz metadata
         """)
         
         if LASTFM_API_KEY:
             st.success("✅ Last.fm integration enabled")
         else:
-            st.info("ℹ️ Using Spotify data only")
+            st.info("ℹ️ Using Spotify + MusicBrainz only")
     
     # Authentication
     sp = ensure_spotify_client()
@@ -479,45 +611,74 @@ def main():
     # Main analysis button
     if st.button("🚀 Analyze My Musical Personality", type="primary", use_container_width=True):
         
-        # Collect data
-        with st.spinner("Collecting your music data..."):
-            music_data = collect_spotify_data(sp)
+        # Collect listening data
+        with st.spinner("Collecting your listening history across time periods..."):
+            listening_data = collect_listening_data(sp)
         
-        if music_data:
-            # Predict personality
-            with st.spinner("Analyzing personality patterns..."):
-                predictions = predict_personality(music_data, predictor)
+        if listening_data and listening_data['artists']:
             
-            if predictions:
-                # Display results
-                display_results(predictions, predictor)
+            # Enrich with genres
+            with st.spinner("Enriching genre data from multiple sources..."):
+                enricher = GenreEnricher(LASTFM_API_KEY)
                 
-                # Show what genres were found
-                if music_data['genres']:
-                    st.subheader("🎼 Genres Detected")
-                    unique_genres = list(set(music_data['genres']))
-                    if unique_genres:
-                        st.write(", ".join(unique_genres))
-                    else:
-                        st.write("No specific genres identified")
+                # Process genres for each time period
+                genres_by_period = {}
+                
+                for period, tracks in listening_data['listening_periods'].items():
+                    if tracks:
+                        # Get artists for this period
+                        period_artist_ids = [track['artists'][0]['id'] for track in tracks if track.get('artists')]
+                        period_artists = [artist for artist in listening_data['artists'] if artist['id'] in period_artist_ids]
+                        
+                        # Enrich genres for this period
+                        period_genres = enricher.enrich_artist_genres(period_artists)
+                        genres_by_period[period] = period_genres
+                        
+                        st.write(f"📊 {period}: {len(period_genres)} genre tags from {len(period_artists)} artists")
+            
+            # Analyze consistency
+            with st.spinner("Analyzing listening patterns and consistency..."):
+                consistency_metrics = analyze_listening_consistency(listening_data, genres_by_period)
+            
+            # Predict personality
+            with st.spinner("Predicting personality from musical patterns..."):
+                prediction_result = predict_personality_from_genres(genres_by_period, consistency_metrics, predictor)
+                
+                if isinstance(prediction_result, tuple):
+                    predictions, consistency_metrics = prediction_result
+                else:
+                    predictions = prediction_result
+            
+            # Display results
+            if predictions and 'error' not in predictions:
+                display_results(predictions, consistency_metrics, genres_by_period, predictor)
                 
                 # Model info
-                with st.expander("About the Model"):
-                    model_info = predictor.get_model_info()
-                    st.write("**Model Performance:**")
-                    if model_info and 'performance' in model_info:
-                        for trait, perf in model_info['performance'].items():
-                            st.write(f"- {trait}: {perf['accuracy']} accuracy (R² = {perf['r2_score']})")
-                    
+                with st.expander("About This Analysis"):
                     st.write("""
                     **How it works:**
-                    - Trained on genre preferences → personality data
-                    - Your Spotify audio features are mapped to genre estimates  
-                    - Personality predicted from estimated genre preferences
-                    - Based on academic research linking music taste to personality
+                    1. Collects your listening history from different time periods
+                    2. Enriches sparse Spotify genre data with Last.fm and MusicBrainz
+                    3. Analyzes consistency patterns in your musical preferences
+                    4. Predicts personality directly from genre preferences
+                    5. Adjusts predictions based on listening consistency patterns
+                    
+                    **Key improvements:**
+                    - No more audio feature conversion (direct genre → personality)
+                    - Multi-source genre enrichment for better coverage
+                    - Temporal consistency analysis affects Openness and Conscientiousness
+                    - Weighted preferences based on listening recency
                     """)
+                    
+                    model_info = predictor.get_model_info()
+                    if model_info and 'performance' in model_info:
+                        st.write("**Model Performance:**")
+                        for trait, perf in model_info['performance'].items():
+                            st.write(f"- {trait}: {perf['accuracy']} accuracy (R² = {perf['r2_score']})")
+            else:
+                st.error("Could not generate personality predictions. Please try again.")
         else:
-            st.error("Could not collect your music data. Make sure you have Spotify listening history.")
+            st.error("Could not collect enough listening data. Make sure you have an active Spotify listening history.")
 
 if __name__ == "__main__":
     main()
