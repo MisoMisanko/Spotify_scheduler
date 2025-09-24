@@ -14,7 +14,7 @@ The project has two main components:
         music genre preferences or audio features.\
     -   Uses validated public datasets (Kaggle Young People Survey and
         Figshare PER dataset).\
-    -   Compares genre-based vs. audio-feature-based approaches.
+    -   Compares genre-based vs. audio-feature-based approaches.
 2.  **Streamlit Application**
     -   Full app coded in Streamlit.\
     -   Spotify login to collect personal listening history.\
@@ -31,6 +31,9 @@ The project has two main components:
     SPOTIFY_SCHEDULER/
     │  app.py                      # Streamlit app
     │  production_predictor.py      # Model loading and prediction interface
+    │  extract_coefficients.py      # Extract Ridge regression coefficients
+    │  coefficient_analysis.csv     # Generated coefficient analysis results
+    │  coefficient_matrix.csv       # Complete coefficient matrix
     │  requirements.txt             # Python dependencies
     │
     ├─ data/
@@ -95,6 +98,14 @@ To retrain the models on the Kaggle dataset:
 
 ``` bash
 python src/train_production_model.py
+```
+
+### Extracting Model Coefficients
+
+To extract and analyze Ridge regression coefficients:
+
+``` bash
+python extract_coefficients.py
 ```
 
 ### Running Analysis
